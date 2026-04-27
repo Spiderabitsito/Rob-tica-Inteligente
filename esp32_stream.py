@@ -289,10 +289,10 @@ def build_sensor_json(buf):
 
 def build_status_json():
     addr = '"%s"' % hex(sensor.mpu_addr) if sensor.mpu_addr else 'null'
-    sda  = sensor.sda if sensor.sda is not None else -1
-    scl  = sensor.scl if sensor.scl is not None else -1
-    freq = sensor.freq if sensor.freq is not None else 0
-    return ('{"mpu":%s,"sda":%d,"scl":%d,"freq":%d,"reads":%d,'
+    sda  = str(sensor.sda) if sensor.sda is not None else 'null'
+    scl  = str(sensor.scl) if sensor.scl is not None else 'null'
+    freq = str(sensor.freq) if sensor.freq is not None else 'null'
+    return ('{"mpu":%s,"sda":%s,"scl":%s,"freq":%s,"reads":%d,'
             '"errors":%d,"buf":%d,"cal":%s,"interval_ms":%d}'
             % (addr, sda, scl, freq, sensor.read_count, sensor.error_count,
                len(sensor.buf), 'true' if sensor.calibrated else 'false',
