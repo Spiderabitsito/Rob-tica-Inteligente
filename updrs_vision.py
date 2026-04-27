@@ -233,22 +233,22 @@ class IMUPreprocessor:
         self.GRAV_ALPHA = grav_alpha
         self.gyro_offset = (np.zeros(3) if gyro_offset is None
                             else np.asarray(gyro_offset, dtype=np.float64))
+        self._init_state()
 
+    def _init_state(self):
         # IIR low-pass state (per axis).
         self._lp_a = np.zeros(3)
         self._lp_g = np.zeros(3)
-
         # 3-tap median ring buffer per axis (3 axes x 3 samples).
         self._med_a = np.zeros((3, 3))
         self._med_g = np.zeros((3, 3))
         self._med_idx = 0
-        self._n_seen = 0       # warmup counter for median
-
+        self._n_seen = 0
         # Gravity tracked via complementary filter; bootstrap on first sample.
         self._gravity = None
 
     def reset(self):
-        self.__init__(self.LP_ALPHA, self.GRAV_ALPHA, self.gyro_offset)
+        self._init_state()
 
     def process(self, ax, ay, az, gx, gy, gz, t_ms):
         a = np.array((ax, ay, az), dtype=np.float64)
@@ -297,25 +297,27 @@ class SignalProcessor:
 
     def __init__(self, max_samples=1024):
         self._max = max_samples
-        self.ax = deque(maxlen=max_samples)
-        self.ay = deque(maxlen=max_samples)
-        self.az = deque(maxlen=max_samples)
-        self.gx = deque(maxlen=max_samples)
-        self.gy = deque(maxlen=max_samples)
-        self.gz = deque(maxlen=max_samples)
-        self.t  = deque(maxlen=max_samples)
+        self._init_buffers()
 
-        self.thumb_idx_dist = deque(maxlen=max_samples)
+    def _init_buffers(self):
+        m = self._max
+        self.ax = deque(maxlen=m)
+        self.ay = deque(maxlen=m)
+        self.az = deque(maxlen=m)
+        self.gx = deque(maxlen=m)
+        self.gy = deque(maxlen=m)
+        self.gz = deque(maxlen=m)
+        self.t  = deque(maxlen=m)
+        self.thumb_idx_dist = deque(maxlen=m)
         self.tap_intervals  = deque(maxlen=100)
-
         self._cache = None
         self._cache_t = 0.0
 
     def add_processed_sample(self, sample7):
-        ax, ay, az, gx, gy, gz, t_ms = sample7
-        self.ax.append(ax); self.ay.append(ay); self.az.append(az)
-        self.gx.append(gx); self.gy.append(gy); self.gz.append(gz)
-        self.t.append(t_ms)
+        sx, sy, sz, rx, ry, rz, ts = sample7
+        self.ax.append(sx); self.ay.append(sy); self.az.append(sz)
+        self.gx.append(rx); self.gy.append(ry); self.gz.append(rz)
+        self.t.append(ts)
 
     def add_vision_sample(self, normalized):
         self.thumb_idx_dist.append(normalized)
@@ -324,7 +326,7 @@ class SignalProcessor:
         self.tap_intervals.append(interval_sec)
 
     def reset(self):
-        self.__init__(max_samples=self._max)
+        self._init_buffers()
 
     # ---- helpers ----
 
@@ -709,10 +711,10 @@ def detect_pronation(lms, label):
 #  DIBUJO
 # =====================================================================
 def _draw_segments(canvas, lms, segments, color, thickness=2):
-    for s_i, e_i in segments:
-        s = lm_to_pixel(lms.landmark[s_i])
-        e = lm_to_pixel(lms.landmark[e_i])
-        cv2.line(canvas, s, e, color, thickness)
+    for start_idx, end_idx in segments:
+        pa = lm_to_pixel(lms.landmark[start_idx])
+        pb = lm_to_pixel(lms.landmark[end_idx])
+        cv2.line(canvas, pa, pb, color, thickness)
 
 
 def draw_landmarks(canvas, lms, label):
@@ -891,123 +893,151 @@ def draw_plots(canvas):
 
 
 # =====================================================================
-#  MAIN LOOP
+#  PER-FRAME PROCESSING (separated for clarity & to avoid name shadowing
+#  warnings between the main loop and class methods)
 # =====================================================================
-print("=" * 60)
-print("  UPDRS Parte 3 - Analisis Cuantitativo")
-print("  ESP32-CAM + MPU6050")
-print("  Frame : " + FRAME_URL)
-print("  Sensor: " + SENSOR_URL)
-print("  Teclas: Q=salir  R=reset  P=imprime metricas")
-print("=" * 60)
+def process_imu_batch(samples):
+    """Push one batch of raw IMU samples through preprocessor + plots."""
+    for sample in samples:
+        if len(sample) < 7:
+            continue
+        proc = imu_pre.process(sample[0], sample[1], sample[2],
+                               sample[3], sample[4], sample[5], sample[6])
+        sig_proc.add_processed_sample(proc)
+        a_dx, a_dy, a_dz, g_x, g_y, g_z, _ = proc
+        plot_accel.add(math.sqrt(a_dx * a_dx + a_dy * a_dy + a_dz * a_dz))
+        plot_gyro.add (math.sqrt(g_x * g_x + g_y * g_y + g_z * g_z))
 
-sensor_reader.start()
 
-# Session reusable para /frame (keep-alive => ahorra TCP setup en cada frame).
-frame_session = requests.Session()
-frame_session.headers.update({"Connection": "keep-alive"})
+def process_hands(canvas_img, results):
+    """Update vision-derived signals and draw landmarks for each detected hand."""
+    if not results.multi_hand_landmarks:
+        return
+    for idx, hand_lm in enumerate(results.multi_hand_landmarks):
+        hlabel = results.multi_handedness[idx].classification[0].label
+        tracker = hand_trackers.setdefault(hlabel, HandTracker())
 
-fps_ts = time.time(); fps_n = 0; fps_val = 0.0
-last_metrics_log = time.time()
+        tid = thumb_index_normalized(hand_lm)
+        sig_proc.add_vision_sample(tid)
+        plot_vision.add(tid)
 
-while True:
-    frame_data = get_frame(FRAME_URL, frame_session)
-    if not frame_data:
-        time.sleep(0.2)
-        continue
+        tracker.update_tap(detect_tapping(hand_lm), sig_proc)
+        tracker.update_oc(detect_open_close(hand_lm))
+        tracker.update_pron(detect_pronation(hand_lm, hlabel))
+
+        draw_landmarks(canvas_img, hand_lm, hlabel)
+
+
+def print_metrics_dump(metrics_dict, individual_scores, composite_score,
+                       updrs_grade, label_text):
+    print("\n" + "=" * 50)
+    print("  METRICAS ACTUALES")
+    print("=" * 50)
+    print(f"  fs efectiva     = {metrics_dict['fs']:.2f} Hz")
+    print(f"  Muestras IMU    = {sensor_reader.total_samples}")
+    for k in ('frequency', 'amplitude', 'angular_vel', 'cv', 'jerk'):
+        print(f"  {k:12s}    = {metrics_dict[k]:.3f}"
+              f"  -> score {individual_scores[k]:.2f}")
+    print(f"  Indice compuesto = {composite_score:.3f}")
+    print(f"  UPDRS            = {updrs_grade} ({label_text})")
+    print("=" * 50)
+
+
+# =====================================================================
+#  MAIN
+# =====================================================================
+def main():
+    print("=" * 60)
+    print("  UPDRS Parte 3 - Analisis Cuantitativo")
+    print("  ESP32-CAM + MPU6050")
+    print("  Frame : " + FRAME_URL)
+    print("  Sensor: " + SENSOR_URL)
+    print("  Teclas: Q=salir  R=reset  P=imprime metricas")
+    print("=" * 60)
+
+    sensor_reader.start()
+
+    # Session reusable para /frame (keep-alive ahorra setup TCP por frame).
+    frame_session = requests.Session()
+    frame_session.headers.update({"Connection": "keep-alive"})
+
+    fps_ts = time.time()
+    fps_n = 0
+    fps_val = 0.0
+    last_metrics_log = time.time()
 
     try:
-        frame = cv2.imdecode(np.frombuffer(frame_data, np.uint8), cv2.IMREAD_COLOR)
-    except Exception:
-        frame = None
-    if frame is None:
-        continue
-
-    # IMU: pasa cada raw por el preprocesador antes de almacenar.
-    imu_samples = sensor_reader.get_samples()
-    if imu_samples:
-        for s in imu_samples:
-            if len(s) < 7:
+        while True:
+            frame_data = get_frame(FRAME_URL, frame_session)
+            if not frame_data:
+                time.sleep(0.2)
                 continue
-            processed = imu_pre.process(s[0], s[1], s[2], s[3], s[4], s[5], s[6])
-            sig_proc.add_processed_sample(processed)
-            ax, ay, az, gx, gy, gz, _ = processed
-            plot_accel.add(math.sqrt(ax * ax + ay * ay + az * az))
-            plot_gyro.add (math.sqrt(gx * gx + gy * gy + gz * gz))
 
-    # Vision
-    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    results = hands.process(rgb)
+            try:
+                frame = cv2.imdecode(np.frombuffer(frame_data, np.uint8),
+                                     cv2.IMREAD_COLOR)
+            except Exception:
+                frame = None
+            if frame is None:
+                continue
 
-    canvas = np.zeros((CANVAS_H, CANVAS_W, 3), dtype=np.uint8)
-    canvas[:VIDEO_H, :VIDEO_W] = cv2.resize(frame, (VIDEO_W, VIDEO_H))
+            imu_samples = sensor_reader.get_samples()
+            if imu_samples:
+                process_imu_batch(imu_samples)
 
-    if results.multi_hand_landmarks:
-        for idx, hand_lm in enumerate(results.multi_hand_landmarks):
-            hlabel = results.multi_handedness[idx].classification[0].label
-            tk = hand_trackers.setdefault(hlabel, HandTracker())
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            results = hands.process(rgb)
 
-            tid = thumb_index_normalized(hand_lm)
-            sig_proc.add_vision_sample(tid)
-            plot_vision.add(tid)
+            canvas = np.zeros((CANVAS_H, CANVAS_W, 3), dtype=np.uint8)
+            canvas[:VIDEO_H, :VIDEO_W] = cv2.resize(frame, (VIDEO_W, VIDEO_H))
 
-            tk.update_tap(detect_tapping(hand_lm), sig_proc)
-            tk.update_oc(detect_open_close(hand_lm))
-            tk.update_pron(detect_pronation(hand_lm, hlabel))
+            process_hands(canvas, results)
 
-            draw_landmarks(canvas, hand_lm, hlabel)
+            metrics = sig_proc.compute_all()
+            individual, composite, updrs, ulabel = scorer.compute(metrics)
 
-    # Una sola compute_all() por frame (cacheada a 4Hz).
-    metrics = sig_proc.compute_all()
-    individual, composite, updrs, ulabel = scorer.compute(metrics)
+            draw_panel(canvas, metrics, individual, composite, updrs, ulabel)
+            draw_plots(canvas)
 
-    draw_panel(canvas, metrics, individual, composite, updrs, ulabel)
-    draw_plots(canvas)
+            fps_n += 1
+            now = time.time()
+            if now - fps_ts >= 1.0:
+                fps_val = fps_n / (now - fps_ts)
+                fps_ts, fps_n = now, 0
+            cv2.putText(canvas, f"FPS: {fps_val:.1f}",
+                        (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                        (255, 255, 255), 1, cv2.LINE_AA)
 
-    # FPS
-    fps_n += 1
-    now = time.time()
-    if now - fps_ts >= 1.0:
-        fps_val = fps_n / (now - fps_ts)
-        fps_ts, fps_n = now, 0
-    cv2.putText(canvas, f"FPS: {fps_val:.1f}",
-                (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                (255, 255, 255), 1, cv2.LINE_AA)
+            if now - last_metrics_log >= 3.0:
+                last_metrics_log = now
+                print("[MET] fs=%.1fHz  freq=%.2fHz  amp=%.3f"
+                      "  omega=%.1fd/s  CV=%.1f%%  jerk=%.2fg/s"
+                      % (metrics['fs'], metrics['frequency'],
+                         metrics['amplitude'], metrics['angular_vel'],
+                         metrics['cv'], metrics['jerk']))
 
-    if now - last_metrics_log >= 3.0:
-        last_metrics_log = now
-        print("[MET] fs=%.1fHz  freq=%.2fHz  amp=%.3f  omega=%.1fd/s  CV=%.1f%%  jerk=%.2fg/s"
-              % (metrics['fs'], metrics['frequency'], metrics['amplitude'],
-                 metrics['angular_vel'], metrics['cv'], metrics['jerk']))
+            cv2.imshow("UPDRS - Analisis Cuantitativo", canvas)
 
-    cv2.imshow("UPDRS - Analisis Cuantitativo", canvas)
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q'):
+                break
+            if key == ord('r'):
+                hand_trackers.clear()
+                sig_proc.reset()
+                imu_pre.reset()
+                plot_accel.data.clear()
+                plot_gyro.data.clear()
+                plot_vision.data.clear()
+                print("[RESET] Contadores, buffers, preprocesador y graficas reiniciados")
+            elif key == ord('p'):
+                m = sig_proc.compute_all(force=True)
+                ind, comp, upd, lab = scorer.compute(m)
+                print_metrics_dump(m, ind, comp, upd, lab)
+    finally:
+        sensor_reader.stop()
+        cv2.destroyAllWindows()
+        hands.close()
 
-    key = cv2.waitKey(1) & 0xFF
-    if key == ord('q'):
-        break
-    elif key == ord('r'):
-        hand_trackers.clear()
-        sig_proc.reset()
-        imu_pre.reset()
-        plot_accel.data.clear()
-        plot_gyro.data.clear()
-        plot_vision.data.clear()
-        print("[RESET] Contadores, buffers, preprocesador y graficas reiniciados")
-    elif key == ord('p'):
-        m = sig_proc.compute_all(force=True)
-        ind, comp, upd, lab = scorer.compute(m)
-        print("\n" + "=" * 50)
-        print("  METRICAS ACTUALES")
-        print("=" * 50)
-        print(f"  fs efectiva     = {m['fs']:.2f} Hz")
-        print(f"  Muestras IMU    = {sensor_reader.total_samples}")
-        for k in ('frequency', 'amplitude', 'angular_vel', 'cv', 'jerk'):
-            print(f"  {k:12s}    = {m[k]:.3f}  -> score {ind[k]:.2f}")
-        print(f"  Indice compuesto = {comp:.3f}")
-        print(f"  UPDRS            = {upd} ({lab})")
-        print("=" * 50)
 
-# Cleanup
-sensor_reader.stop()
-cv2.destroyAllWindows()
-hands.close()
+if __name__ == "__main__":
+    main()
