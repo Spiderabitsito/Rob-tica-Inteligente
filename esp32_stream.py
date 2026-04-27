@@ -1,24 +1,47 @@
 """
 ESP32-S3 CAM + MPU6050 - Servidor HTTP
 =======================================
+Placa: Freenove ESP32-S3 WROOM CAM (FNK0085) con OV2640/OV3660.
+
 Endpoints:
   /frame   -> JPEG VGA 640x480
   /sensor  -> JSON {"s":[[ax,ay,az,gx,gy,gz,ms], ...]}
-  /status  -> JSON diagnostico (mpu addr, n_reads, n_errors, calibrado)
+  /status  -> JSON diagnostico
   /        -> Pagina HTML
 
-Conexiones MPU6050:
-  SDA -> GPIO 8     SCL -> GPIO 9
-  VCC -> 3.3V       GND -> GND
-  AD0 -> GND (0x68) o 3.3V (0x69)
+CONEXIONES MPU6050 (GY-521):
+  SDA -> GPIO 41     <- libre en Freenove FNK0085
+  SCL -> GPIO 42     <- libre en Freenove FNK0085
+  VCC -> 3.3V        (5V tambien funciona; el GY-521 trae regulador)
+  GND -> GND
+  AD0 -> GND (addr 0x68)  o  3.3V (addr 0x69)
 
-Cambios respecto a la version anterior:
-  - Buffer circular real con deque(maxlen=128) (antes lista + slice)
-  - Auto-calibracion de gyro en boot (~1s de muestras estaticas)
-  - Recovery I2C: reinicia el bus tras N errores consecutivos
-  - Rate gate de muestreo a 100 Hz (evita oversampling)
-  - send_response() helper - elimina copia-pega en handlers
-  - /status reporta cal, errors, addr, fs efectiva
+Por que NO usar SDA=8/SCL=9 en esta placa:
+  GPIO 8 y 9 son lineas de datos de la camara (Y4 y Y3 del bus paralelo).
+  Ademas, MicroPython usa esos pines como default de I2C(0) en ESP32-S3,
+  lo cual hace que el scan parezca funcionar pero choque con la camara.
+
+Por que I2C(1) y no I2C(0):
+  I2C(0) sin args usa los pines default (8/9). I2C(1) no tiene defaults
+  conflictivos en ESP32-S3, asi que es el bus seguro para sensores externos.
+
+Pines libres en la Freenove FNK0085 (verificado contra docs oficiales):
+  GPIO 1, 2, 14, 21, 41, 42, 47   <- broken-out y sin uso por la camara/SD
+  Camara ocupa: 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 16, 17, 18
+  PSRAM ocupa : 35, 36, 37
+  microSD     : 38, 39, 40
+  USB nativo  : 19, 20
+  UART consola: 43, 44
+  Strapping   : 0, 3, 45, 46
+
+Si MPU6050 no aparece en (41, 42), el codigo prueba automaticamente:
+  fallback 1: (41, 42) a 100 kHz (cables largos)
+  fallback 2: (1, 2)   a 400 kHz
+  fallback 3: (1, 2)   a 100 kHz
+
+Paquetes MicroPython requeridos:
+  - Solo los modulos del firmware Freenove (network, socket, machine,
+    camera). NO se requiere instalar via mip ni copiar archivos.
 """
 
 import network
@@ -127,6 +150,9 @@ class SensorState:
     def __init__(self):
         self.mpu          = None
         self.mpu_addr     = None
+        self.sda          = None     # GPIO num finally used for SDA
+        self.scl          = None     # GPIO num finally used for SCL
+        self.freq         = None     # I2C bus freq finally used
         self.buf          = deque((), BUF_LEN)
         self.read_count   = 0
         self.error_count  = 0
@@ -150,29 +176,81 @@ class SensorState:
 sensor = SensorState()
 
 
-def init_i2c():
-    """Returns (i2c, mpu) or (None, None) on failure. Tries both addresses."""
-    print("[I2C] Init SDA=GPIO8, SCL=GPIO9, 400kHz...")
+# =====================================================================
+#  CAMERA  (init FIRST so it claims its pins before we touch I2C)
+# =====================================================================
+cam = Camera(frame_size=FrameSize.VGA, pixel_format=PixelFormat.JPEG)
+cam.init()
+print("[CAM] VGA 640x480 ready")
+
+
+# =====================================================================
+#  I2C - probe sequence
+# =====================================================================
+# (bus_id, sda, scl, freq) tried in order until one finds an MPU.
+# I2C(1) avoids MicroPython's default I2C(0) pins (8, 9) which collide
+# with the OV2640/OV3660 data lines on this board.
+I2C_PROBE_SEQUENCE = (
+    (1, 41, 42, 400_000),    # primary - free pins, fast bus
+    (1, 41, 42, 100_000),    # same pins, slower bus (forgiving with long jumpers)
+    (1,  1,  2, 400_000),    # backup pair on the other side of the header
+    (1,  1,  2, 100_000),
+)
+
+
+def _try_bus(bus_id, sda, scl, freq):
+    """Returns (i2c, mpu, addr, sda, scl, freq) if MPU found, else None."""
     try:
-        i2c = I2C(0, sda=Pin(8), scl=Pin(9), freq=400000)
-        devs = i2c.scan()
-        print("[I2C] Devices:", [hex(d) for d in devs])
-        for addr in (0x68, 0x69):
-            if addr in devs:
-                try:
-                    return i2c, MPU6050(i2c, addr=addr), addr
-                except Exception as e:
-                    print("[MPU] init failed at", hex(addr), ":", e)
-        print("[MPU] NOT detected. Check wiring SDA=8, SCL=9, VCC=3.3V, GND")
+        i2c = I2C(bus_id, sda=Pin(sda), scl=Pin(scl), freq=freq)
     except Exception as e:
-        print("[I2C] Bus init error:", e)
-    return None, None, None
+        print("[I2C] bus%d sda=%d scl=%d freq=%d  init error: %s"
+              % (bus_id, sda, scl, freq, e))
+        return None
+
+    try:
+        devs = i2c.scan()
+    except Exception as e:
+        print("[I2C] bus%d sda=%d scl=%d freq=%d  scan error: %s"
+              % (bus_id, sda, scl, freq, e))
+        return None
+
+    print("[I2C] bus%d sda=%d scl=%d freq=%-6d  devs=%s"
+          % (bus_id, sda, scl, freq, [hex(d) for d in devs]))
+
+    for addr in (0x68, 0x69):
+        if addr in devs:
+            try:
+                mpu = MPU6050(i2c, addr=addr)
+                return i2c, mpu, addr, sda, scl, freq
+            except Exception as e:
+                print("[MPU] init failed at %s: %s" % (hex(addr), e))
+    return None
+
+
+def init_i2c():
+    """Walk the probe sequence; return (i2c, mpu, addr, sda, scl, freq) or 6×None."""
+    print("[I2C] Probing buses (Freenove FNK0085 free pins: 1,2,14,21,41,42,47)")
+    for bus_id, sda, scl, freq in I2C_PROBE_SEQUENCE:
+        result = _try_bus(bus_id, sda, scl, freq)
+        if result:
+            return result
+    print("")
+    print("[MPU] NOT detected on ANY tested pin pair.")
+    print("      Verify wiring at the MPU6050 (GY-521):")
+    print("        VCC -> 3.3V (or 5V; GY-521 has a regulator)")
+    print("        GND -> GND")
+    print("        SDA -> GPIO 41    SCL -> GPIO 42")
+    print("        AD0 floating or to GND -> address 0x68")
+    print("      If it still fails, swap SDA<->SCL once (common rookie mistake).")
+    return None, None, None, None, None, None
 
 
 # Boot: init + calibrate
-i2c_bus, sensor.mpu, sensor.mpu_addr = init_i2c()
+(i2c_bus, sensor.mpu, sensor.mpu_addr,
+ sensor.sda, sensor.scl, sensor.freq) = init_i2c()
 if sensor.mpu:
-    print("[MPU] OK at %s (+-4g, +-500 d/s, 100Hz, DLPF 44Hz)" % hex(sensor.mpu_addr))
+    print("[MPU] OK at %s on bus1 sda=%d scl=%d freq=%d (+-4g, +-500 d/s, 100Hz)"
+          % (hex(sensor.mpu_addr), sensor.sda, sensor.scl, sensor.freq))
     print("[CAL] Calibrating gyro - keep sensor still for ~1s ...")
     n_ok = sensor.mpu.calibrate_gyro()
     if n_ok > 0:
@@ -181,14 +259,6 @@ if sensor.mpu:
               % (n_ok, sensor.mpu.gx_off, sensor.mpu.gy_off, sensor.mpu.gz_off))
     else:
         print("[CAL] FAILED (no samples). Continuing without offset.")
-
-
-# =====================================================================
-#  CAMERA
-# =====================================================================
-cam = Camera(frame_size=FrameSize.VGA, pixel_format=PixelFormat.JPEG)
-cam.init()
-print("[CAM] VGA 640x480 ready")
 
 
 # =====================================================================
@@ -219,8 +289,12 @@ def build_sensor_json(buf):
 
 def build_status_json():
     addr = '"%s"' % hex(sensor.mpu_addr) if sensor.mpu_addr else 'null'
-    return ('{"mpu":%s,"reads":%d,"errors":%d,"buf":%d,"cal":%s,"interval_ms":%d}'
-            % (addr, sensor.read_count, sensor.error_count,
+    sda  = sensor.sda if sensor.sda is not None else -1
+    scl  = sensor.scl if sensor.scl is not None else -1
+    freq = sensor.freq if sensor.freq is not None else 0
+    return ('{"mpu":%s,"sda":%d,"scl":%d,"freq":%d,"reads":%d,'
+            '"errors":%d,"buf":%d,"cal":%s,"interval_ms":%d}'
+            % (addr, sda, scl, freq, sensor.read_count, sensor.error_count,
                len(sensor.buf), 'true' if sensor.calibrated else 'false',
                SAMPLE_INTERVAL_MS))
 
@@ -239,14 +313,16 @@ def send_response(client, content_type, payload, extra=b''):
 
 
 def reinit_i2c():
-    """Try to recover from runaway I2C errors by re-creating the bus + driver."""
+    """Re-walk the probe sequence after consecutive read errors."""
     global i2c_bus
     print("[I2C] Reinit after %d consecutive errors" % sensor.consec_err)
     try:
-        i2c_bus, sensor.mpu, sensor.mpu_addr = init_i2c()
+        (i2c_bus, sensor.mpu, sensor.mpu_addr,
+         sensor.sda, sensor.scl, sensor.freq) = init_i2c()
         sensor.consec_err = 0
         if sensor.mpu:
-            print("[I2C] Recovered at %s" % hex(sensor.mpu_addr))
+            print("[I2C] Recovered at %s on sda=%d scl=%d"
+                  % (hex(sensor.mpu_addr), sensor.sda, sensor.scl))
     except Exception as e:
         print("[I2C] Reinit failed:", e)
 
@@ -311,15 +387,19 @@ while True:
         else:
             imu_str = hex(sensor.mpu_addr) if sensor.mpu_addr else "NO DETECTADO"
             cal_str = "OK" if sensor.calibrated else "PENDIENTE"
+            pins_str = ("SDA=%d SCL=%d @ %d Hz"
+                        % (sensor.sda, sensor.scl, sensor.freq)
+                        if sensor.sda is not None else "no init")
             html = (
                 '<html><head><title>ESP32 UPDRS</title></head><body>'
-                '<h1>ESP32-CAM + MPU6050</h1>'
+                '<h1>ESP32-S3 CAM (Freenove FNK0085) + MPU6050</h1>'
                 '<p>Camera: VGA 640x480</p>'
-                '<p>MPU6050: %s &nbsp; Cal: %s &nbsp; Reads: %d &nbsp; Errors: %d</p>'
+                '<p>MPU6050: %s &nbsp; Pines: %s &nbsp; Cal: %s</p>'
+                '<p>Reads: %d &nbsp; Errors: %d</p>'
                 '<img src="/frame" width="640">'
                 '<p><a href="/sensor">/sensor</a> | '
                 '<a href="/status">/status</a></p>'
-                '</body></html>' % (imu_str, cal_str,
+                '</body></html>' % (imu_str, pins_str, cal_str,
                                     sensor.read_count, sensor.error_count)
             )
             send_response(client, b'text/html', html.encode())
