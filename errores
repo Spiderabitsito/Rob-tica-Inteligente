@@ -1,0 +1,286 @@
+INFO: Created TensorFlow Lite XNNPACK delegate for CPU.
+Traceback (most recent call last):
+  File "C:\Users\Electronica\PYTHON.py", line 633, in <module>
+    sensor_reader = SensorReader(SENSOR_URL, interval=0.05)
+  File "C:\Users\Electronica\PYTHON.py", line 571, in __init__
+    self._session = requests.Session()
+NameError: name 'requests' is not defined
+
+
+
+
+
+NameError: name 'requests' is not defined
+PYTHON.py, line 571
+Python doesn't know what requests stands for.
+Did you forget to import it?
+If you meant module requests, then add import requests to the beginning of your script
+Has Python executed the definition?
+Don't forget that name becomes defined when corresponding definition ('=', 'def' or 'import') gets executed. If the definition comes later in code or is inside an if-statement, Python may not have executed it (yet).
+Make sure Python arrives to the definition before it arrives to this line. When in doubt, use the debugger.
+
+
+Warnings
+May help you find the cause of the error.
+PYTHON.py
+Line 143 : Need type annotation for "data"  [var-annotated]
+Line 151 : Redefining name 'canvas' from outer scope (line 941)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 250 : Accessing "__init__" on an instance is unsound, since instance.__init__ could be from an incompatible subclass  [misc]
+Line 252 : Redefining name 'ax' from outer scope (line 933)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 252 : Redefining name 'ay' from outer scope (line 933)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 252 : Redefining name 'az' from outer scope (line 933)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 252 : Redefining name 'gx' from outer scope (line 933)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 252 : Redefining name 'gy' from outer scope (line 933)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 252 : Redefining name 'gz' from outer scope (line 933)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 299 : Need type annotation for "ax"  [var-annotated]
+Line 300 : Need type annotation for "ay"  [var-annotated]
+Line 301 : Need type annotation for "az"  [var-annotated]
+Line 302 : Need type annotation for "gx"  [var-annotated]
+Line 303 : Need type annotation for "gy"  [var-annotated]
+Line 304 : Need type annotation for "gz"  [var-annotated]
+Line 305 : Need type annotation for "t"  [var-annotated]
+Line 307 : Need type annotation for "thumb_idx_dist"  [var-annotated]
+Line 308 : Need type annotation for "tap_intervals"  [var-annotated]
+Line 314 : Redefining name 'ax' from outer scope (line 933)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 314 : Redefining name 'ay' from outer scope (line 933)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 314 : Redefining name 'az' from outer scope (line 933)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 314 : Redefining name 'gx' from outer scope (line 933)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 314 : Redefining name 'gy' from outer scope (line 933)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 314 : Redefining name 'gz' from outer scope (line 933)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 326 : Accessing "__init__" on an instance is unsound, since instance.__init__ could be from an incompatible subclass  [misc]
+Line 368 : Redefining name 'ax' from outer scope (line 933)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 368 : Redefining name 'ay' from outer scope (line 933)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 368 : Redefining name 'az' from outer scope (line 933)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 404 : Redefining name 'gx' from outer scope (line 933)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 404 : Redefining name 'gy' from outer scope (line 933)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 404 : Redefining name 'gz' from outer scope (line 933)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 424 : Redefining name 'ax' from outer scope (line 933)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 424 : Redefining name 'ay' from outer scope (line 933)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 424 : Redefining name 'az' from outer scope (line 933)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 440 : Redefining name 'now' from outer scope (line 968)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 446 : Redefining name 'ax' from outer scope (line 933)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 447 : Redefining name 'ay' from outer scope (line 933)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 448 : Redefining name 'az' from outer scope (line 933)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 449 : Redefining name 'gx' from outer scope (line 933)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 450 : Redefining name 'gy' from outer scope (line 933)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 451 : Redefining name 'gz' from outer scope (line 933)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 499 : Redefining name 'metrics' from outer scope (line 960)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 500 : Redefining name 'individual' from outer scope (line 961)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 502 : Redefining name 'composite' from outer scope (line 961)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 504 : Redefining name 'updrs' from outer scope (line 961)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 522 : Redefining name 'now' from outer scope (line 968)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 571 : Name "requests" is not defined  [name-defined]
+Line 607 : Name "requests" is not defined  [name-defined]
+Line 609 : Name "requests" is not defined  [name-defined]
+Line 629 : Need type annotation for "hand_trackers" (hint: "hand_trackers: dict[<type>, <type>] = ...")  [var-annotated]
+Line 667 : Redefining name 's' from outer scope (line 928)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 674 : Redefining name 's' from outer scope (line 928)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 710 : Redefining name 'canvas' from outer scope (line 941)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 712 : Redefining name 's' from outer scope (line 928)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 717 : Redefining name 'canvas' from outer scope (line 941)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 733 : Redefining name 'canvas' from outer scope (line 941)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 741 : Redefining name 'canvas' from outer scope (line 941)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 760 : Redefining name 'canvas' from outer scope (line 941)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 765 : Redefining name 'canvas' from outer scope (line 941)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 765 : Redefining name 'hlabel' from outer scope (line 946)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 765 : Redefining name 'tk' from outer scope (line 947)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 794 : Redefining name 'canvas' from outer scope (line 941)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 794 : Redefining name 'metrics' from outer scope (line 960)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 794 : Redefining name 'individual' from outer scope (line 961)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 820 : Redefining name 'canvas' from outer scope (line 941)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 820 : Redefining name 'composite' from outer scope (line 961)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 820 : Redefining name 'updrs' from outer scope (line 961)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 820 : Redefining name 'ulabel' from outer scope (line 961)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 835 : Redefining name 'canvas' from outer scope (line 941)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 835 : Redefining name 'metrics' from outer scope (line 960)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 835 : Redefining name 'individual' from outer scope (line 961)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 835 : Redefining name 'composite' from outer scope (line 961)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 835 : Redefining name 'updrs' from outer scope (line 961)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 835 : Redefining name 'ulabel' from outer scope (line 961)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 859 : Redefining name 'hlabel' from outer scope (line 946)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 860 : Redefining name 'tk' from outer scope (line 947)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 886 : Redefining name 'canvas' from outer scope (line 941)
+It looks like the local variable is hiding a global variable with the same name.
+Most likely there is nothing wrong with this. I just wanted to remind you that you can't access the global variable like this. If you knew it then please ignore the warning.
+If you don't want to see this reminder in the future, then add "redefined-outer-name" (without quotes) into "Tools → Options → Assistant → Disabled checks".
+Line 906 : Name "requests" is not defined  [name-defined]
