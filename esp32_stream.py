@@ -1,23 +1,24 @@
 """
-ESP32-S3 CAM + MPU6050 — Servidor HTTP
+ESP32-S3 CAM + MPU6050 - Servidor HTTP
 =======================================
 Endpoints:
-  /frame   -> JPEG de la camara (VGA 640x480)
-  /sensor  -> JSON con muestras acumuladas del MPU6050
-  /status  -> JSON con diagnostico rapido
-  /        -> Pagina HTML de estado
+  /frame   -> JPEG VGA 640x480
+  /sensor  -> JSON {"s":[[ax,ay,az,gx,gy,gz,ms], ...]}
+  /status  -> JSON diagnostico (mpu addr, n_reads, n_errors, calibrado)
+  /        -> Pagina HTML
 
 Conexiones MPU6050:
-  SDA -> GPIO 8
-  SCL -> GPIO 9
-  VCC -> 3.3V
-  GND -> GND
-  AD0 -> GND (direccion 0x68) o 3.3V (direccion 0x69)
+  SDA -> GPIO 8     SCL -> GPIO 9
+  VCC -> 3.3V       GND -> GND
+  AD0 -> GND (0x68) o 3.3V (0x69)
 
-Diagnostico en consola Thonny:
-  - Al iniciar: escaneo I2C con lista de direcciones
-  - Cada ~2 segundos: muestra ultima lectura del MPU
-  - Cada peticion /sensor: cuenta de muestras enviadas
+Cambios respecto a la version anterior:
+  - Buffer circular real con deque(maxlen=128) (antes lista + slice)
+  - Auto-calibracion de gyro en boot (~1s de muestras estaticas)
+  - Recovery I2C: reinicia el bus tras N errores consecutivos
+  - Rate gate de muestreo a 100 Hz (evita oversampling)
+  - send_response() helper - elimina copia-pega en handlers
+  - /status reporta cal, errors, addr, fs efectiva
 """
 
 import network
@@ -25,8 +26,20 @@ import socket
 import select
 import struct
 import time
+from collections import deque
 from machine import I2C, Pin
 from camera import Camera, FrameSize, PixelFormat
+
+
+# Cross-reference contract: updrs_vision.py:IMU_PAYLOAD_KEY must match.
+IMU_PAYLOAD_KEY = "s"
+
+# Sample rate target. The MPU runs at 100 Hz internally; we gate reads
+# so we never sample faster than this even if the loop runs faster.
+SAMPLE_INTERVAL_MS = 10            # 100 Hz
+BUF_LEN            = 200           # ~2 s @ 100 Hz - PC poll = 80 ms
+GYRO_CAL_SAMPLES   = 100           # ~1 s static at boot
+I2C_REINIT_AFTER   = 20            # consecutive read errors before bus reset
 
 
 # =====================================================================
@@ -40,7 +53,7 @@ ap.config(
     authmode=network.AUTH_WPA2_PSK,
     max_clients=4,
     channel=1,
-    hidden=False
+    hidden=False,
 )
 print("")
 print("=" * 50)
@@ -49,11 +62,9 @@ print("=" * 50)
 
 
 # =====================================================================
-#  MPU6050 — DRIVER I2C
+#  MPU6050 DRIVER
 # =====================================================================
 class MPU6050:
-    """Driver minimo MPU6050."""
-
     _ASCALE = {0x00: 16384.0, 0x08: 8192.0, 0x10: 4096.0, 0x18: 2048.0}
     _GSCALE = {0x00: 131.0,   0x08: 65.5,   0x10: 32.8,   0x18: 16.4}
 
@@ -62,19 +73,21 @@ class MPU6050:
         self.addr  = addr
         self.a_div = self._ASCALE.get(accel_range, 8192.0)
         self.g_div = self._GSCALE.get(gyro_range, 65.5)
+        # Boot-calibrated gyro offsets (deg/s); subtracted from every read.
+        self.gx_off = 0.0
+        self.gy_off = 0.0
+        self.gz_off = 0.0
+        self._configure()
 
-        # Wake up
-        self.i2c.writeto_mem(self.addr, 0x6B, b'\x00')
+    def _configure(self):
+        self.i2c.writeto_mem(self.addr, 0x6B, b'\x00')   # wake
         time.sleep_ms(100)
-        # Sample rate 1kHz / (1+9) = 100 Hz
-        self.i2c.writeto_mem(self.addr, 0x19, b'\x09')
-        # DLPF: 44 Hz bandwidth
-        self.i2c.writeto_mem(self.addr, 0x1A, b'\x03')
-        # Ranges
-        self.i2c.writeto_mem(self.addr, 0x1C, bytes([accel_range]))
-        self.i2c.writeto_mem(self.addr, 0x1B, bytes([gyro_range]))
+        self.i2c.writeto_mem(self.addr, 0x19, b'\x09')   # 1 kHz / 10 = 100 Hz
+        self.i2c.writeto_mem(self.addr, 0x1A, b'\x03')   # DLPF 44 Hz
+        self.i2c.writeto_mem(self.addr, 0x1C, bytes([0x08]))  # +-4g
+        self.i2c.writeto_mem(self.addr, 0x1B, bytes([0x08]))  # +-500 deg/s
 
-    def read(self):
+    def read_raw(self):
         raw = self.i2c.readfrom_mem(self.addr, 0x3B, 14)
         ax = struct.unpack('>h', raw[0:2])[0]   / self.a_div
         ay = struct.unpack('>h', raw[2:4])[0]   / self.a_div
@@ -84,40 +97,90 @@ class MPU6050:
         gz = struct.unpack('>h', raw[12:14])[0] / self.g_div
         return ax, ay, az, gx, gy, gz
 
+    def read(self):
+        ax, ay, az, gx, gy, gz = self.read_raw()
+        return ax, ay, az, gx - self.gx_off, gy - self.gy_off, gz - self.gz_off
 
-# --- Inicializar I2C + MPU6050 con escaneo de ambas direcciones ---
-mpu = None
-i2c = None
-mpu_addr = None
-
-print("[I2C] Inicializando en SDA=GPIO8, SCL=GPIO9, 400kHz...")
-try:
-    i2c = I2C(0, sda=Pin(8), scl=Pin(9), freq=400000)
-    devs = i2c.scan()
-    print("[I2C] Dispositivos detectados:", [hex(d) for d in devs])
-
-    for candidate in (0x68, 0x69):
-        if candidate in devs:
+    def calibrate_gyro(self, n_samples=GYRO_CAL_SAMPLES):
+        """Average n_samples of the gyro at rest. Caller must keep sensor still."""
+        sx = sy = sz = 0.0
+        ok = 0
+        for _ in range(n_samples):
             try:
-                mpu = MPU6050(i2c, addr=candidate, accel_range=0x08, gyro_range=0x08)
-                mpu_addr = candidate
-                print("[MPU] OK en direccion %s (+-4g, +-500 deg/s, 100Hz, DLPF 44Hz)"
-                      % hex(candidate))
-                break
-            except Exception as e:
-                print("[MPU] Fallo init en", hex(candidate), ":", e)
+                _, _, _, gx, gy, gz = self.read_raw()
+                sx += gx; sy += gy; sz += gz
+                ok += 1
+            except Exception:
+                pass
+            time.sleep_ms(SAMPLE_INTERVAL_MS)
+        if ok > 0:
+            self.gx_off = sx / ok
+            self.gy_off = sy / ok
+            self.gz_off = sz / ok
+        return ok
 
-    if not mpu:
-        print("[MPU] NO detectado. Revisa cableado SDA=8, SCL=9, VCC=3.3V, GND")
-except Exception as e:
-    print("[I2C] Error:", e)
+
+# =====================================================================
+#  SENSOR STATE
+# =====================================================================
+class SensorState:
+    def __init__(self):
+        self.mpu          = None
+        self.mpu_addr     = None
+        self.buf          = deque((), BUF_LEN)
+        self.read_count   = 0
+        self.error_count  = 0
+        self.consec_err   = 0
+        self.last_sample  = None
+        self.calibrated   = False
+        self.last_read_ms = 0
+
+    def append(self, sample, ts_ms):
+        self.buf.append((sample[0], sample[1], sample[2],
+                         sample[3], sample[4], sample[5], ts_ms))
+        self.last_sample = sample
+        self.read_count += 1
+
+    def drain(self):
+        out = list(self.buf)
+        self.buf = deque((), BUF_LEN)
+        return out
 
 
-# Buffer circular: [ax, ay, az, gx, gy, gz, ms]
-sensor_buf   = []
-MAX_BUF      = 128     # ~1.3s a 100Hz
-read_count   = 0        # total de lecturas
-last_sample  = None     # ultima lectura para log
+sensor = SensorState()
+
+
+def init_i2c():
+    """Returns (i2c, mpu) or (None, None) on failure. Tries both addresses."""
+    print("[I2C] Init SDA=GPIO8, SCL=GPIO9, 400kHz...")
+    try:
+        i2c = I2C(0, sda=Pin(8), scl=Pin(9), freq=400000)
+        devs = i2c.scan()
+        print("[I2C] Devices:", [hex(d) for d in devs])
+        for addr in (0x68, 0x69):
+            if addr in devs:
+                try:
+                    return i2c, MPU6050(i2c, addr=addr), addr
+                except Exception as e:
+                    print("[MPU] init failed at", hex(addr), ":", e)
+        print("[MPU] NOT detected. Check wiring SDA=8, SCL=9, VCC=3.3V, GND")
+    except Exception as e:
+        print("[I2C] Bus init error:", e)
+    return None, None, None
+
+
+# Boot: init + calibrate
+i2c_bus, sensor.mpu, sensor.mpu_addr = init_i2c()
+if sensor.mpu:
+    print("[MPU] OK at %s (+-4g, +-500 d/s, 100Hz, DLPF 44Hz)" % hex(sensor.mpu_addr))
+    print("[CAL] Calibrating gyro - keep sensor still for ~1s ...")
+    n_ok = sensor.mpu.calibrate_gyro()
+    if n_ok > 0:
+        sensor.calibrated = True
+        print("[CAL] Done (%d samples)  offsets g=(%.2f,%.2f,%.2f) d/s"
+              % (n_ok, sensor.mpu.gx_off, sensor.mpu.gy_off, sensor.mpu.gz_off))
+    else:
+        print("[CAL] FAILED (no samples). Continuing without offset.")
 
 
 # =====================================================================
@@ -125,11 +188,11 @@ last_sample  = None     # ultima lectura para log
 # =====================================================================
 cam = Camera(frame_size=FrameSize.VGA, pixel_format=PixelFormat.JPEG)
 cam.init()
-print("[CAM] VGA 640x480 lista")
+print("[CAM] VGA 640x480 ready")
 
 
 # =====================================================================
-#  HTTP SERVER (no-bloqueante via select.poll)
+#  HTTP SERVER
 # =====================================================================
 srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -140,63 +203,88 @@ srv.setblocking(False)
 poller = select.poll()
 poller.register(srv, select.POLLIN)
 
-print("[HTTP] Servidor activo (puerto 80)")
-print("         /frame   -> JPEG camara")
-print("         /sensor  -> JSON MPU")
-print("         /status  -> JSON diagnostico")
+print("[HTTP] Active port 80   /frame /sensor /status")
 print("=" * 50)
 
 
 def build_sensor_json(buf):
-    """JSON compacto: {"s":[[ax,ay,az,gx,gy,gz,ms],...]}"""
     if not buf:
-        return '{"s":[]}'
+        return '{"%s":[]}' % IMU_PAYLOAD_KEY
     parts = []
     for ax, ay, az, gx, gy, gz, t in buf:
         parts.append('[%.4f,%.4f,%.4f,%.2f,%.2f,%.2f,%d]'
                      % (ax, ay, az, gx, gy, gz, t))
-    return '{"s":[' + ','.join(parts) + ']}'
+    return '{"%s":[' % IMU_PAYLOAD_KEY + ','.join(parts) + ']}'
 
 
 def build_status_json():
-    mpu_str = '"%s"' % (hex(mpu_addr) if mpu_addr else 'null')
-    return ('{"mpu":%s,"reads":%d,"buf":%d}'
-            % (mpu_str, read_count, len(sensor_buf)))
+    addr = '"%s"' % hex(sensor.mpu_addr) if sensor.mpu_addr else 'null'
+    return ('{"mpu":%s,"reads":%d,"errors":%d,"buf":%d,"cal":%s,"interval_ms":%d}'
+            % (addr, sensor.read_count, sensor.error_count,
+               len(sensor.buf), 'true' if sensor.calibrated else 'false',
+               SAMPLE_INTERVAL_MS))
+
+
+def send_response(client, content_type, payload, extra=b''):
+    """Single source of truth for HTTP responses (replaces 4x copy-paste)."""
+    hdr = (b'HTTP/1.1 200 OK\r\n'
+           b'Content-Type: ' + content_type + b'\r\n'
+           b'Content-Length: ' + str(len(payload)).encode() + b'\r\n'
+           b'Cache-Control: no-cache\r\n'
+           b'Connection: close\r\n'
+           + extra +
+           b'\r\n')
+    client.send(hdr)
+    client.sendall(payload)
+
+
+def reinit_i2c():
+    """Try to recover from runaway I2C errors by re-creating the bus + driver."""
+    global i2c_bus
+    print("[I2C] Reinit after %d consecutive errors" % sensor.consec_err)
+    try:
+        i2c_bus, sensor.mpu, sensor.mpu_addr = init_i2c()
+        sensor.consec_err = 0
+        if sensor.mpu:
+            print("[I2C] Recovered at %s" % hex(sensor.mpu_addr))
+    except Exception as e:
+        print("[I2C] Reinit failed:", e)
 
 
 # =====================================================================
-#  LOOP PRINCIPAL
+#  MAIN LOOP
 # =====================================================================
-next_log_ms = time.ticks_ms() + 2000   # log cada 2s
+next_log_ms = time.ticks_ms() + 2000
 
 while True:
-    # ---- 1. Leer sensor cada iteracion ----
-    if mpu:
-        try:
-            s = mpu.read()
-            sensor_buf.append((s[0], s[1], s[2], s[3], s[4], s[5], time.ticks_ms()))
-            last_sample = s
-            read_count += 1
-            if len(sensor_buf) > MAX_BUF:
-                sensor_buf = sensor_buf[-MAX_BUF:]
-        except Exception as e:
-            # no imprimir en cada error para no saturar
-            pass
-
-    # ---- Log periodico del MPU ----
     now_ms = time.ticks_ms()
-    if time.ticks_diff(now_ms, next_log_ms) >= 0 and last_sample:
-        ax, ay, az, gx, gy, gz = last_sample
-        print("[MPU] #%d  a=(%+.2f,%+.2f,%+.2f)g  g=(%+6.1f,%+6.1f,%+6.1f)d/s  buf=%d"
-              % (read_count, ax, ay, az, gx, gy, gz, len(sensor_buf)))
+
+    # 1. Sample MPU at most every SAMPLE_INTERVAL_MS
+    if sensor.mpu and time.ticks_diff(now_ms, sensor.last_read_ms) >= SAMPLE_INTERVAL_MS:
+        try:
+            s = sensor.mpu.read()
+            sensor.append(s, now_ms)
+            sensor.last_read_ms = now_ms
+            sensor.consec_err = 0
+        except Exception:
+            sensor.error_count += 1
+            sensor.consec_err += 1
+            if sensor.consec_err >= I2C_REINIT_AFTER:
+                reinit_i2c()
+
+    # Periodic diagnostic log
+    if time.ticks_diff(now_ms, next_log_ms) >= 0 and sensor.last_sample:
+        ax, ay, az, gx, gy, gz = sensor.last_sample
+        print("[MPU] #%d  a=(%+.2f,%+.2f,%+.2f)g  g=(%+6.1f,%+6.1f,%+6.1f)d/s  buf=%d  err=%d"
+              % (sensor.read_count, ax, ay, az, gx, gy, gz,
+                 len(sensor.buf), sensor.error_count))
         next_log_ms = time.ticks_add(now_ms, 2000)
 
-    # ---- 2. Esperar cliente (timeout corto) ----
+    # 2. Service HTTP (5 ms timeout)
     events = poller.poll(5)
     if not events:
         continue
 
-    # ---- 3. Atender peticion ----
     client = None
     try:
         client, addr = srv.accept()
@@ -207,56 +295,38 @@ while True:
         if path == "/frame":
             frame = cam.capture()
             if frame:
-                # Content-Length evita truncado/corrupcion JPEG
-                hdr = (b'HTTP/1.1 200 OK\r\n'
-                       b'Content-Type: image/jpeg\r\n'
-                       b'Content-Length: ' + str(len(frame)).encode() + b'\r\n'
-                       b'Cache-Control: no-cache\r\n'
-                       b'Connection: close\r\n\r\n')
-                client.send(hdr)
-                client.sendall(frame)
+                send_response(client, b'image/jpeg', frame)
             else:
                 client.send(b'HTTP/1.1 500 Error\r\n\r\n')
 
         elif path == "/sensor":
-            n_samples = len(sensor_buf)
-            payload = build_sensor_json(sensor_buf).encode()
-            sensor_buf = []
-            hdr = (b'HTTP/1.1 200 OK\r\n'
-                   b'Content-Type: application/json\r\n'
-                   b'Content-Length: ' + str(len(payload)).encode() + b'\r\n'
-                   b'Cache-Control: no-cache\r\n\r\n')
-            client.send(hdr)
-            client.sendall(payload)
+            samples = sensor.drain()
+            send_response(client, b'application/json',
+                          build_sensor_json(samples).encode())
 
         elif path == "/status":
-            payload = build_status_json().encode()
-            hdr = (b'HTTP/1.1 200 OK\r\n'
-                   b'Content-Type: application/json\r\n'
-                   b'Content-Length: ' + str(len(payload)).encode() + b'\r\n\r\n')
-            client.send(hdr)
-            client.sendall(payload)
+            send_response(client, b'application/json',
+                          build_status_json().encode())
 
         else:
-            imu_str = hex(mpu_addr) if mpu_addr else "NO DETECTADO"
+            imu_str = hex(sensor.mpu_addr) if sensor.mpu_addr else "NO DETECTADO"
+            cal_str = "OK" if sensor.calibrated else "PENDIENTE"
             html = (
                 '<html><head><title>ESP32 UPDRS</title></head><body>'
                 '<h1>ESP32-CAM + MPU6050</h1>'
                 '<p>Camera: VGA 640x480</p>'
-                '<p>MPU6050: %s  Lecturas: %d</p>'
+                '<p>MPU6050: %s &nbsp; Cal: %s &nbsp; Reads: %d &nbsp; Errors: %d</p>'
                 '<img src="/frame" width="640">'
                 '<p><a href="/sensor">/sensor</a> | '
                 '<a href="/status">/status</a></p>'
-                '</body></html>' % (imu_str, read_count)
+                '</body></html>' % (imu_str, cal_str,
+                                    sensor.read_count, sensor.error_count)
             )
-            payload = html.encode()
-            hdr = (b'HTTP/1.1 200 OK\r\n'
-                   b'Content-Type: text/html\r\n'
-                   b'Content-Length: ' + str(len(payload)).encode() + b'\r\n\r\n')
-            client.send(hdr)
-            client.sendall(payload)
+            send_response(client, b'text/html', html.encode())
 
     except Exception:
+        # Specific OSError / ValueError would be tighter, but MicroPython's
+        # request decoder raises a grab-bag; broad catch keeps the server alive.
         pass
     finally:
         if client:
