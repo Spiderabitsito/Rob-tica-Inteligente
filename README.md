@@ -221,7 +221,7 @@ Y la consola PC imprime cada 3 s un resumen de métricas:
 |---|---|
 | **Sousa Paixão, Peres & Andrade (2019)** — *Parameter Estimate from Accelerometer and Gyroscope for Characterization of Wrist Tremor in Individuals with Parkinson's Disease*, en Costa-Felix et al. (eds.), XXVI Brazilian Congress on Biomedical Engineering, IFMBE Proceedings 70/1, p. 513. ISBN 978-981-13-2119-1. | Fórmula del **Tremor Normality Index** `In_j = (rms_j − MPS) / STDPS`, ventana RMS de 5 s, pre-bandpass 1–50 Hz. |
 | **Keba, Bachmann, Lass & Rätsep (2025)** — *Assessing Parkinson's Rest Tremor from the Wrist with Accelerometry and Gyroscope Signals in Patients with Deep Brain Stimulation: An Observational Study*, J. Clin. Med. 14, 2073. https://doi.org/10.3390/jcm14062073 | Justificación para usar **escala log** (Weber-Fechner: `log(rms) ∝ UPDRS`), bandpass 1–40 Hz, prioridad de accel sobre gyro en muñeca/falange. |
-| **Ito et al. (2020)** — *The relationships between three-axis accelerometer measures of physical activity and motor symptoms in patients with Parkinson's disease*, BMC Neurology 20:340. https://doi.org/10.1186/s12883-020-01896-w | No incorporado en este sprint (orientado a monitoreo diario waist-worn, no a tareas cortas). Idea pendiente: **percentil 95–92.5** como estadística robusta para amplitud vision. |
+| **Ito et al. (2020)** — *The relationships between three-axis accelerometer measures of physical activity and motor symptoms in patients with Parkinson's disease*, BMC Neurology 20:340. https://doi.org/10.1186/s12883-020-01896-w | No incorporado en este sprint (orientado a monitoreo diario waist-worn, no a tareas cortas). Idea pendiente: **percentil 95–92.5** como estadística robusta para amplitud visión. |
 
 ---
 
