@@ -126,7 +126,7 @@ python updrs_vision.py
 | Variable | Origen | Correspondencia clínica |
 |---|---|---|
 | Frecuencia (Hz) | FFT de \|a_dyn\| (banda 0.5–8 Hz) | banda parkinsoniana 3–7 Hz |
-| Amplitud vision | rango P95–P5 distancia pulgar–índice | hipocinesia (sólo display, no entra al composite) |
+| Amplitud visión | rango P95–P5 distancia pulgar–índice | hipocinesia (sólo display, no entra al composite) |
 | RMS-a (mg) | RMS aceleración dinámica 5 s | severidad del tremor |
 | CV (%) | desv/media intervalos entre toques | irregularidad |
 | Jerk (g/s) | derivada de aceleración dinámica | falta de control / suavidad |
