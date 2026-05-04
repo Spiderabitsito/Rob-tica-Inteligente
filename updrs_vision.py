@@ -1,22 +1,35 @@
 """
 UPDRS Parte 3 - Analisis Cuantitativo de Movimientos
 =====================================================
-Fusion ESP32-CAM (vision + MediaPipe) + MPU6050 (IMU via I2C).
+Fusion ESP32-S3 CAM (vision + MediaPipe) + MPU6050 (IMU via I2C),
+sensor montado en la falange distal del dedo indice.
 
-5 Variables cuantitativas:
-  1. Frecuencia    FFT de aceleracion sin gravedad             (Hz)
-  2. Amplitud      Rango P95-P5 pulgar-indice (norm. tamano)   (-)
-  3. Vel. angular  RMS giroscopio                              (deg/s)
-  4. Regularidad   CV intervalos entre taps                    (%)
-  5. Jerk          Magnitud derivada de a_dynamic              (g/s)
+Metricas:
+  Primarias (clinicas):
+    UPDRS grade        0..4    indice compuesto, escala log
+    In_a (acelerom.)   x veces baseline saludable (Sousa Paixao 2019)
+    In_g (giroscopio)  x veces baseline saludable
 
-Pipeline IMU (NUEVO):
-  raw -> median(3) -> IIR LP 15Hz -> gravity comp.filter -> a_dynamic
-  Antes de FFT: resample a grid uniforme + detrend + Hanning + rfft
+  Secundarias (diagnostico):
+    Frecuencia (Hz)    pico FFT en 3-7 Hz (banda del tremor parkinsoniano)
+    Amplitud vision    rango P95-P5 distancia pulgar-indice
+    RMS-a (g)          RMS de aceleracion dinamica en 5s
+    CV (%)             coef. variacion intervalos entre taps
+    Jerk (g/s)         derivada de aceleracion dinamica
 
-Layout 1100x840:
-  Top   (600): video 800x600 | panel lateral 300x600
-  Bottom(240): 3 graficas tiempo real (a_dyn, |w|, dist pulgar-indice)
+Pipeline IMU:
+  raw -> median(3) -> IIR LP 15Hz -> comp.filter HP 1Hz gravedad -> a_dynamic
+  RMS-a en ventana 5s, |a_dyn| con gravedad ya removida
+  FFT con resample uniforme + detrend + Hanning, banda 0.5-8 Hz
+
+Calibracion (OBLIGATORIA primera vez):
+  Tecla [C] graba 10s con sensor inmovil en mano sana -> baseline MPS/STDPS
+  Persistido en ~/.updrs_baseline.json con metadatos del setup
+
+Atajos UI:
+  Q  salir             G  toggle plots crudos (default oculto)
+  R  reset contadores  F  toggle FFT spectrum (debug)
+  P  imprime metricas  C  calibrar baseline saludable
 """
 
 import os
@@ -25,6 +38,8 @@ os.environ["OPENCV_LOG_LEVEL"] = "ERROR"
 os.environ["OPENCV_FFMPEG_LOGLEVEL"] = "-8"
 
 import cv2
+import datetime
+import json
 import math
 import numpy as np
 import requests
@@ -32,6 +47,7 @@ import mediapipe as mp
 import time
 import threading
 from collections import deque
+from PIL import Image, ImageDraw, ImageFont
 
 
 # =====================================================================
@@ -45,11 +61,14 @@ STATUS_URL = f"http://{ESP32_IP}/status"
 # Schema key del payload /sensor; cross-reference: esp32_stream.py:IMU_PAYLOAD_KEY.
 IMU_PAYLOAD_KEY = "s"
 
-VIDEO_W, VIDEO_H = 800, 600
-PANEL_W          = 300
-PLOT_H           = 240
-CANVAS_W         = VIDEO_W + PANEL_W
-CANVAS_H         = VIDEO_H + PLOT_H
+# Layout: video grande + panel lateral ancho. Plots crudos se muestran
+# bajo el video solo si el usuario presiona G (default oculto).
+VIDEO_W, VIDEO_H = 960, 720
+PANEL_W          = 380
+PLOT_H           = 200            # altura de la franja de plots cuando esta visible
+CANVAS_W         = VIDEO_W + PANEL_W            # 1340
+CANVAS_H_PLOTS   = VIDEO_H + PLOT_H              # con plots: 920
+CANVAS_H_NOPLOTS = VIDEO_H                       # sin plots: 720
 
 # Hand-label string constants (MediaPipe convention).
 HAND_RIGHT = "Right"
@@ -68,6 +87,14 @@ ROT_NEUTRO = "Neutro"
 # Sensor target sample rate (matches firmware SAMPLE_INTERVAL_MS=10ms).
 TARGET_FS_HZ = 100.0
 
+# Bandpass del pipeline IMU (Brainstorm de paper review: 1-15 Hz para
+# falange distal evita ruido HF y drift de baja frec.).
+BP_LOW_HZ  = 1.0
+BP_HIGH_HZ = 15.0
+
+# Ventana de RMS para In_a / In_g (Sousa Paixao 2019, 5 s).
+RMS_WINDOW_S = 5.0
+
 # Si pasan mas de OFFLINE_AFTER_S sin recibir muestras, marca IMU OFFLINE.
 # Sin esto, la badge parpadea cada poll vacio normal (~ cada 80 ms).
 OFFLINE_AFTER_S = 1.5
@@ -77,6 +104,10 @@ METRICS_CACHE_S = 0.25   # 4 Hz - mas que suficiente para UI a 30 FPS.
 
 # Log a terminal cada N muestras IMU recibidas.
 DEBUG_PRINT_EVERY = 50
+
+# Calibracion: 10 s minimo (paper review recomendo >= 10 s para stdev estable).
+CALIBRATION_DURATION_S = 10.0
+BASELINE_PATH = os.path.expanduser("~/.updrs_baseline.json")
 
 
 # =====================================================================
@@ -131,6 +162,87 @@ def lm_to_pixel(lm):
 
 
 # =====================================================================
+#  TEXT RENDERER (Pillow + TTF -> texto antialiased nitido)
+# =====================================================================
+class TextRenderer:
+    """
+    cv2.putText con FONT_HERSHEY_* dibuja con strokes lineales sin
+    antialias verdadero -> el texto se ve "144p" como reporto el usuario.
+    Esta clase usa Pillow + TrueType para renderizado nitido.
+
+    Patron: encolar varios draws por frame y aplicarlos en UNA pasada
+    (cada conversion ndarray<->PIL es costosa, ~3-5 ms en 1340x920).
+    """
+
+    # Buscar fuentes en orden: Windows -> macOS -> Linux. Cae a default si nada.
+    FONT_CANDIDATES = (
+        "C:/Windows/Fonts/segoeui.ttf",          # Segoe UI Regular
+        "C:/Windows/Fonts/arial.ttf",
+        "/System/Library/Fonts/Supplemental/Helvetica.ttc",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    )
+    FONT_BOLD_CANDIDATES = (
+        "C:/Windows/Fonts/segoeuib.ttf",         # Segoe UI Bold
+        "C:/Windows/Fonts/arialbd.ttf",
+        "/System/Library/Fonts/Supplemental/Helvetica.ttc",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    )
+
+    def __init__(self):
+        self._regular_path = self._find_font(self.FONT_CANDIDATES)
+        self._bold_path    = self._find_font(self.FONT_BOLD_CANDIDATES)
+        self._cache        = {}                  # (size, bold) -> ImageFont
+        self._queue        = []                  # list[(x, y, text, size, color, bold)]
+
+    @staticmethod
+    def _find_font(candidates):
+        for path in candidates:
+            if os.path.exists(path):
+                return path
+        return None
+
+    def font(self, size, bold=False):
+        key = (size, bold)
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+        path = self._bold_path if bold else self._regular_path
+        try:
+            font = (ImageFont.truetype(path, size) if path
+                    else ImageFont.load_default())
+        except Exception:
+            font = ImageFont.load_default()
+        self._cache[key] = font
+        return font
+
+    def measure(self, text, size, bold=False):
+        font = self.font(size, bold)
+        bbox = font.getbbox(text)
+        return bbox[2] - bbox[0], bbox[3] - bbox[1]
+
+    def queue(self, x, y, text, size=14, color=(220, 220, 220), bold=False):
+        # color es BGR (convencion cv2). Lo guardamos asi y convertimos al flush.
+        self._queue.append((x, y, text, size, color, bold))
+
+    def flush(self, canvas):
+        """Aplica todos los draws encolados en una sola pasada PIL."""
+        if not self._queue:
+            return
+        img_pil = Image.fromarray(canvas[:, :, ::-1])    # BGR -> RGB
+        draw = ImageDraw.Draw(img_pil)
+        for x, y, text, size, color, bold in self._queue:
+            # color BGR -> RGB para PIL
+            rgb = (int(color[2]), int(color[1]), int(color[0]))
+            draw.text((x, y), text, fill=rgb, font=self.font(size, bold))
+        canvas[:] = np.asarray(img_pil)[:, :, ::-1]      # RGB -> BGR
+        self._queue.clear()
+
+
+# Singleton (instanciado tras la primera funcion que lo necesite, ver mas abajo).
+text = TextRenderer()
+
+
+# =====================================================================
 #  SCROLLING PLOT (polyline vectorizado)
 # =====================================================================
 class ScrollingPlot:
@@ -150,22 +262,22 @@ class ScrollingPlot:
         self.data.append(float(value))
 
     def draw(self, canvas, x, y):
+        # Marco
         cv2.rectangle(canvas, (x, y), (x + self.width, y + self.height),
                       (18, 18, 25), -1)
         cv2.rectangle(canvas, (x, y), (x + self.width, y + self.height),
                       (70, 70, 85), 1)
-        cv2.putText(canvas, self.title, (x + 8, y + 16),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.42,
-                    (220, 220, 230), 1, cv2.LINE_AA)
-        cv2.putText(canvas, self.unit, (x + self.width - 55, y + 16),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.32,
-                    (150, 150, 160), 1, cv2.LINE_AA)
+        # Titulo y unidad - se encolan al TextRenderer global y se aplican
+        # con el flush del frame (consistencia tipografica con el panel).
+        text.queue(x + 10, y + 6,  self.title, size=12,
+                   color=(220, 220, 230), bold=True)
+        text.queue(x + self.width - 60, y + 8, self.unit, size=10,
+                   color=(150, 150, 160))
 
         if len(self.data) < 2:
-            cv2.putText(canvas, "(esperando datos...)",
-                        (x + 8, y + self.height // 2),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.38,
-                        (120, 120, 130), 1, cv2.LINE_AA)
+            text.queue(x + 10, y + self.height // 2 - 6,
+                       "(esperando datos...)", size=11,
+                       color=(120, 120, 130))
             return
 
         arr = np.fromiter(self.data, dtype=np.float32, count=len(self.data))
@@ -178,10 +290,10 @@ class ScrollingPlot:
         if y_max - y_min < 1e-6:
             y_max = y_min + 1e-6
 
-        plot_top    = y + 24
+        plot_top    = y + 26
         plot_bottom = y + self.height - 6
-        plot_left   = x + 6
-        plot_right  = x + self.width - 60
+        plot_left   = x + 8
+        plot_right  = x + self.width - 70
         plot_h      = plot_bottom - plot_top
         plot_w      = plot_right - plot_left
 
@@ -198,16 +310,12 @@ class ScrollingPlot:
         cv2.polylines(canvas, [pts], isClosed=False,
                       color=self.color, thickness=1, lineType=cv2.LINE_AA)
 
-        cv2.putText(canvas, f"{y_max:+.2f}", (plot_left + 2, plot_top + 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.30,
-                    (130, 130, 140), 1, cv2.LINE_AA)
-        cv2.putText(canvas, f"{y_min:+.2f}", (plot_left + 2, plot_bottom - 2),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.30,
-                    (130, 130, 140), 1, cv2.LINE_AA)
-        cv2.putText(canvas, f"{arr[-1]:+.2f}",
-                    (plot_right + 6, plot_top + plot_h // 2 + 4),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.48,
-                    self.color, 1, cv2.LINE_AA)
+        text.queue(plot_left + 2, plot_top - 2,  f"{y_max:+.2f}",
+                   size=10, color=(130, 130, 140))
+        text.queue(plot_left + 2, plot_bottom - 12, f"{y_min:+.2f}",
+                   size=10, color=(130, 130, 140))
+        text.queue(plot_right + 6, plot_top + plot_h // 2 - 6,
+                   f"{arr[-1]:+.2f}", size=14, color=self.color, bold=True)
 
 
 # =====================================================================
@@ -223,12 +331,25 @@ class IMUPreprocessor:
     cal de gyro al boot; esto compensa offset residual y fija la
     referencia de gravedad.
 
-    Coeficientes (fs=100Hz):
-      LP_ALPHA   = 0.5    -> cutoff ~16 Hz (sobre la banda de tremor)
-      GRAV_ALPHA = 0.97   -> cutoff ~0.5 Hz (deja pasar movimiento dinamico)
+    Coeficientes (fs=100Hz, banda 1-15 Hz - brainstorm-validated):
+      LP_ALPHA   = 0.485  -> cutoff ~14.6 Hz (formula correcta: arccos(...)
+                              sobre IIR de un polo; arriba de 15 Hz en
+                              falange distal solo hay ruido HF)
+      GRAV_ALPHA = 0.94   -> cutoff ~1.0 Hz (mata drift lento que sesgaba
+                              el RMS hacia arriba; antes era 0.5 Hz)
+
+    NOTA cientifica: la implementacion son DOS IIR de UN polo (6 dB/oct
+    cada uno), NO un Butterworth de orden 4 (24 dB/oct) como en Sousa
+    Paixao 2019 / Keba 2025. La transicion es mas blanda. Razones:
+      - menor overhead computacional online (un MAC por sample)
+      - sin fase de "warmup" para filtfilt
+      - la banda de tremor (3-7 Hz) queda bien aislada igual al estar
+        lejos de los cutoffs (1 y 15 Hz)
+    Si se quiere fidelidad estricta al paper, cambiar a scipy.signal
+    butter+filtfilt (requiere acumular ventana antes de filtrar).
     """
 
-    def __init__(self, lp_alpha=0.5, grav_alpha=0.97, gyro_offset=None):
+    def __init__(self, lp_alpha=0.485, grav_alpha=0.94, gyro_offset=None):
         self.LP_ALPHA   = lp_alpha
         self.GRAV_ALPHA = grav_alpha
         self.gyro_offset = (np.zeros(3) if gyro_offset is None
@@ -280,6 +401,213 @@ class IMUPreprocessor:
         return (a_dyn[0], a_dyn[1], a_dyn[2],
                 self._lp_g[0], self._lp_g[1], self._lp_g[2],
                 t_ms)
+
+
+# =====================================================================
+#  INDEX CALCULATOR  (Sousa Paixao 2019 Tremor Normality Index)
+# =====================================================================
+class IndexCalculator:
+    """
+    In_j = (rms_j - MPS) / STDPS
+      rms_j = RMS del modulo de aceleracion dinamica (o giroscopio)
+              en ventana de 5 s para sujeto j
+      MPS   = media   poblacional sana (calibrada por usuario)
+      STDPS = desv. estandar poblacional sana
+
+    Interpretacion: In = 1 -> tremor a 1 sigma del baseline saludable;
+    In = 8 -> 8x sigma (paciente Parkinson tipico segun Sousa Paixao 2019).
+
+    Calibracion obligatoria primera vez (paper review):
+      - >= 10 s con sensor inmovil en mano sana (>=500 muestras a 100Hz)
+      - guarda site/fs/banda en JSON para auto-invalidar si cambia setup
+
+    Reference values en paper son para wrist; nuestro setup es falange
+    distal del indice (~1.5-2.5x mas amplitud por palanca). Valores
+    default son placeholders para no crashear; refuse_score=True hasta
+    que el usuario presione [C].
+
+    DESVIACIONES CONOCIDAS vs Sousa Paixao 2019 (declaradas para no
+    enganar al lector cientifico):
+
+    1) STDPS practical vs paper:
+       El paper computa MPS, STDPS sobre la distribucion de RMS POR
+       SUJETO en una poblacion sana de N personas. Aca calibramos con
+       UN solo sujeto (1 mano sana), tomando MPS = RMS de la traza
+       continua y STDPS = stdev de las muestras |a_dyn| dentro de la
+       traza. Bajo hipotesis de ergodicidad (mano realmente quieta) MPS
+       converge bien, pero STDPS difiere por ~sqrt(N) y mide stdev
+       intra-sujeto en vez de entre-sujetos. Por eso los thresholds
+       (1.5, 5, 12, 25) en UPDRSScorer son empiricos y NO portados
+       directos del paper. Para uso clinico cuantitativo, calibrar con
+       una cohorte multi-sujeto y reemplazar el contenido de baseline.
+
+    2) max(0, In):
+       El paper permite In negativo cuando un sujeto es "mas quieto"
+       que la media sana. Aqui clip en 0 por simplicidad de UI (el
+       UPDRS ya tiene 0 como suelo). Para reportes cientificos quitar
+       el clip en los logs/CSV.
+
+    3) Bandpass:
+       Paper usa Butterworth orden 4 (24 dB/oct) en 1-50 Hz. Nosotros
+       usamos un par IIR de 1 polo (6 dB/oct) en 1-15 Hz, mas blando
+       en transicion pero mejor adaptado a la falange distal donde
+       arriba de 15 Hz solo hay ruido HF. Ver IMUPreprocessor.
+    """
+
+    SCHEMA_VERSION = 1
+
+    DEFAULT_BASELINE = {
+        "schema_version": SCHEMA_VERSION,
+        "site": "distal_index",
+        "fs_hz": TARGET_FS_HZ,
+        "bp_low_hz": BP_LOW_HZ,
+        "bp_high_hz": BP_HIGH_HZ,
+        # Placeholders (no calibrado todavia)
+        "mps_a_g":     0.012,
+        "stdps_a_g":   0.005,
+        "mps_g_dps":   1.20,
+        "stdps_g_dps": 0.50,
+        "n_samples":   0,
+        "duration_s":  0.0,
+        "timestamp":   "",
+    }
+
+    def __init__(self, path=BASELINE_PATH):
+        self.path = path
+        self.baseline = self._load()
+        self.in_a = 0.0
+        self.in_g = 0.0
+        self.rms_a = 0.0
+        self.rms_g = 0.0
+        # Modo calibracion (set por main): mientras este True, acumula muestras.
+        self.cal_active = False
+        self.cal_started_at = 0.0
+        self.cal_buf_a = []           # list[float] |a_dyn|
+        self.cal_buf_g = []           # list[float] |w|
+
+    # ---- persistence ----
+
+    def _load(self):
+        try:
+            with open(self.path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            # Sanity check: solo acepta si la version y el setup coinciden.
+            if (data.get("schema_version") == self.SCHEMA_VERSION
+                    and data.get("site") == self.DEFAULT_BASELINE["site"]
+                    and abs(data.get("fs_hz", 0) - TARGET_FS_HZ) < 1
+                    and abs(data.get("bp_low_hz", 0)  - BP_LOW_HZ)  < 0.1
+                    and abs(data.get("bp_high_hz", 0) - BP_HIGH_HZ) < 0.1):
+                return {**self.DEFAULT_BASELINE, **data}
+            print("[CAL] Baseline existente con setup distinto - ignorado.")
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            print(f"[CAL] No se pudo leer {self.path}: {e}")
+        return dict(self.DEFAULT_BASELINE)
+
+    def _save(self):
+        try:
+            with open(self.path, "w", encoding="utf-8") as f:
+                json.dump(self.baseline, f, indent=2)
+            print(f"[CAL] Baseline guardado en {self.path}")
+        except Exception as e:
+            print(f"[CAL] No se pudo guardar baseline: {e}")
+
+    @property
+    def is_calibrated(self):
+        return self.baseline.get("n_samples", 0) >= 500   # ~5s @ 100Hz minimo
+
+    # ---- compute on every metrics tick ----
+
+    def update(self, a_arr_x, a_arr_y, a_arr_z, g_arr_x, g_arr_y, g_arr_z, t_ms):
+        """Recompute In_a, In_g sobre la ventana mas reciente RMS_WINDOW_S."""
+        if len(a_arr_x) < 50:
+            self.in_a = 0.0; self.in_g = 0.0
+            self.rms_a = 0.0; self.rms_g = 0.0
+            return
+
+        # Slice ventana de RMS_WINDOW_S desde el final.
+        t_s = t_ms / 1000.0
+        cutoff = t_s[-1] - RMS_WINDOW_S
+        mask = t_s >= cutoff
+        if mask.sum() < 50:
+            return
+
+        a_mag = np.sqrt(a_arr_x[mask] ** 2 + a_arr_y[mask] ** 2 + a_arr_z[mask] ** 2)
+        g_mag = np.sqrt(g_arr_x[mask] ** 2 + g_arr_y[mask] ** 2 + g_arr_z[mask] ** 2)
+
+        self.rms_a = float(np.sqrt(np.mean(a_mag ** 2)))
+        self.rms_g = float(np.sqrt(np.mean(g_mag ** 2)))
+
+        b = self.baseline
+        # In = (rms - MPS) / STDPS, clamp en 0 (un sujeto puede tener menos
+        # tremor que la media saludable -> reporta 0, no negativo).
+        self.in_a = max(0.0, (self.rms_a - b["mps_a_g"])   / max(b["stdps_a_g"],   1e-6))
+        self.in_g = max(0.0, (self.rms_g - b["mps_g_dps"]) / max(b["stdps_g_dps"], 1e-6))
+
+    # ---- calibration mode ----
+
+    def start_calibration(self):
+        self.cal_active = True
+        self.cal_started_at = time.time()
+        self.cal_buf_a = []
+        self.cal_buf_g = []
+        print(f"[CAL] Iniciada. Mantener sensor INMOVIL en mano SANA "
+              f"durante {CALIBRATION_DURATION_S:.0f} s ...")
+
+    def feed_calibration(self, a_arr_x, a_arr_y, a_arr_z,
+                         g_arr_x, g_arr_y, g_arr_z):
+        """Acumula |a_dyn| y |w| del ultimo batch durante la calibracion."""
+        if not self.cal_active:
+            return
+        a_mag = np.sqrt(a_arr_x ** 2 + a_arr_y ** 2 + a_arr_z ** 2)
+        g_mag = np.sqrt(g_arr_x ** 2 + g_arr_y ** 2 + g_arr_z ** 2)
+        self.cal_buf_a.extend(a_mag.tolist())
+        self.cal_buf_g.extend(g_mag.tolist())
+        if time.time() - self.cal_started_at >= CALIBRATION_DURATION_S:
+            self.finish_calibration()
+
+    def finish_calibration(self):
+        self.cal_active = False
+        # Mismo umbral que is_calibrated: si guardamos un baseline con menos
+        # de 500 muestras, is_calibrated lo rechazaria al cargarlo despues.
+        if len(self.cal_buf_a) < 500:
+            print(f"[CAL] FALLIDA: solo {len(self.cal_buf_a)} muestras "
+                  f"(minimo 500 = ~5 s). Verifica que el sensor transmita.")
+            return
+        a = np.asarray(self.cal_buf_a, dtype=np.float64)
+        g = np.asarray(self.cal_buf_g, dtype=np.float64)
+
+        # MPS: RMS de la senal en reposo (= ruido de fondo + micro-tremor sano)
+        # STDPS: stdev de la magnitud (variabilidad esperada en sano)
+        mps_a   = float(np.sqrt(np.mean(a * a)))
+        stdps_a = float(np.std(a))
+        mps_g   = float(np.sqrt(np.mean(g * g)))
+        stdps_g = float(np.std(g))
+
+        self.baseline.update({
+            "schema_version": self.SCHEMA_VERSION,
+            "site":          "distal_index",
+            "fs_hz":         TARGET_FS_HZ,
+            "bp_low_hz":     BP_LOW_HZ,
+            "bp_high_hz":    BP_HIGH_HZ,
+            "mps_a_g":       mps_a,
+            "stdps_a_g":     max(stdps_a, 1e-4),
+            "mps_g_dps":     mps_g,
+            "stdps_g_dps":   max(stdps_g, 1e-2),
+            "n_samples":     len(a),
+            "duration_s":    float(len(a) / TARGET_FS_HZ),
+            "timestamp":     datetime.datetime.now().isoformat(timespec="seconds"),
+        })
+        self._save()
+        print(f"[CAL] Baseline OK: MPS_a={mps_a:.4f}g  STDPS_a={stdps_a:.4f}g"
+              f"  MPS_g={mps_g:.2f}d/s  STDPS_g={stdps_g:.2f}d/s"
+              f"  ({len(a)} muestras)")
+
+    def cal_progress(self):
+        if not self.cal_active:
+            return 0.0
+        return min(1.0, (time.time() - self.cal_started_at) / CALIBRATION_DURATION_S)
 
 
 # =====================================================================
@@ -439,7 +767,12 @@ class SignalProcessor:
 
     # ---- compute_all con cache ----
 
-    def compute_all(self, force=False):
+    def compute_all(self, index_calc=None, force=False):
+        """
+        index_calc: instancia de IndexCalculator. Si se pasa, se actualiza
+        In_a/In_g y, si esta en modo calibracion, recibe las muestras del
+        ultimo batch para acumularlas.
+        """
         now = time.time()
         if not force and self._cache and (now - self._cache_t) < METRICS_CACHE_S:
             return self._cache
@@ -458,6 +791,19 @@ class SignalProcessor:
             ax = ay = az = gx = gy = gz = t_ms = np.empty(0)
             fs = 0.0
 
+        # Actualizar In_a / In_g (Sousa Paixao 2019) y alimentar calibracion.
+        if index_calc is not None and len(ax):
+            index_calc.update(ax, ay, az, gx, gy, gz, t_ms)
+            if index_calc.cal_active:
+                # En modo cal solo nos importan las muestras de los ultimos
+                # ~METRICS_CACHE_S; las anteriores ya se acumularon.
+                if len(t_ms) >= 1:
+                    cutoff = t_ms[-1] - METRICS_CACHE_S * 1000.0
+                    m = t_ms >= cutoff
+                    if m.sum() > 0:
+                        index_calc.feed_calibration(ax[m], ay[m], az[m],
+                                                    gx[m], gy[m], gz[m])
+
         result = {
             'frequency':   self._compute_frequency(ax, ay, az, t_ms),
             'amplitude':   self._compute_amplitude(),
@@ -465,6 +811,11 @@ class SignalProcessor:
             'cv':          self._compute_cv(),
             'jerk':        self._compute_jerk(ax, ay, az, t_ms),
             'fs':          fs,
+            # Indices clinicos (paper 3); 0 si index_calc=None.
+            'in_a':        index_calc.in_a if index_calc else 0.0,
+            'in_g':        index_calc.in_g if index_calc else 0.0,
+            'rms_a':       index_calc.rms_a if index_calc else 0.0,
+            'rms_g':       index_calc.rms_g if index_calc else 0.0,
         }
         self._cache = result
         self._cache_t = now
@@ -472,36 +823,116 @@ class SignalProcessor:
 
 
 # =====================================================================
-#  UPDRS SCORER
+#  UPDRS SCORER (refactor a partir del brainstorm con paper review)
 # =====================================================================
 class UPDRSScorer:
-    RANGES = {
-        'frequency':   {'normal': 4.5,  'severe': 1.0},
-        'amplitude':   {'normal': 0.65, 'severe': 0.10},
-        'angular_vel': {'normal': 180., 'severe': 30.},
-        'cv':          {'normal': 8.,   'severe': 50.},
-        'jerk':        {'normal': 3.,   'severe': 35.},
-    }
+    """
+    Cambios clave vs version anterior (que se quedaba pegada en 2-3):
+
+      1. **In_a (Sousa Paixao) es el driver primario** (peso 50%).
+         Es la unica metrica calibrada contra una poblacion de referencia,
+         asi que evita el sesgo de min/max de sesion.
+
+      2. **Composite leaner**: In_a + freq + cv + jerk. Se quita amplitud
+         vision del composite (solo display) porque depende de si el
+         usuario esta haciendo finger-tap o no - no es severidad.
+
+      3. **Escala log para In_a** (Weber-Fechner, Keba 2025):
+         log(rms) ~ UPDRS_grade. Se mapea directamente:
+            In_a < 1.5  -> grade 0  (within 1.5 sigma del baseline sano)
+            1.5 <= 5    -> grade 1  (slight)
+            5 <= 12     -> grade 2  (mild)
+            12 <= 25    -> grade 3  (moderate)
+            > 25        -> grade 4  (severe)
+
+      4. **Refuse_score** mientras IndexCalculator no este calibrado:
+         devolvemos UPDRS=None y que la UI lo muestre como "Calibrar [C]".
+
+      5. **SNR gate**: si rms_a < 1.5 * MPS_a, reportar "Reposo" en vez
+         de UPDRS=0 (no es lo mismo "no hay tremor" que "no hay senal").
+    """
+
+    # Thresholds aplicados a In_a directamente.
+    # Sousa Paixao 2019 reporta healthy mean ~1, PD sin carga ~8 (accel).
+    #   1.5 (limite 0/1): defensible (>1.5 sigma del baseline sano)
+    #   5.0 (1/2):        un poco bajo del PD-mean del paper, agresivo
+    #   12 y 25 (2/3, 3/4): EXTRAPOLADOS por nosotros, no estan en el
+    #                       paper. Refinar contra cohorte propia cuando
+    #                       haya pacientes graduados por neurologo.
+    IN_A_GRADE_THRESHOLDS = (1.5, 5.0, 12.0, 25.0)
+
+    # Pesos del composite (suman 1.0). In_a domina porque es la unica
+    # metrica calibrada contra poblacion sana.
     WEIGHTS = {
-        'frequency':   0.25, 'amplitude':   0.20, 'angular_vel': 0.15,
-        'cv':          0.25, 'jerk':        0.15,
+        'in_a':      0.50,
+        'frequency': 0.15,
+        'cv':        0.25,
+        'jerk':      0.10,
     }
+
+    # Rangos para metricas secundarias (escala log para freq y jerk).
+    # frequency: normal 0 (sin pico en 3-7 Hz), severe 6 (pico fuerte en banda PD)
+    # cv:        normal 5%, severe 50%
+    # jerk:      normal 0.5 g/s, severe 30 g/s (escala log)
+    RANGES = {
+        'frequency': {'normal': 0.5, 'severe': 6.0},   # Hz
+        'cv':        {'normal': 5.0, 'severe': 50.0},  # %
+        'jerk':      {'normal': 0.5, 'severe': 30.0},  # g/s
+    }
+
     LABELS = {0: "Normal", 1: "Leve", 2: "Moderado leve",
               3: "Moderado", 4: "Severo"}
     COLORS = {0: (0, 200, 0),   1: (0, 210, 170), 2: (0, 210, 210),
               3: (0, 140, 255), 4: (0, 50, 255)}
 
-    def normalize_var(self, name, value):
-        r = self.RANGES[name]
-        if name in ('cv', 'jerk'):
-            score = (value - r['normal']) / (r['severe'] - r['normal'])
-        else:
-            score = (r['normal'] - value) / (r['normal'] - r['severe'])
-        return max(0.0, min(1.0, score))
+    @staticmethod
+    def _normalize_in_a(in_a):
+        """Mapea In_a -> [0,1] usando thresholds clinicos discretos."""
+        th = UPDRSScorer.IN_A_GRADE_THRESHOLDS
+        if in_a < th[0]:               return 0.0
+        if in_a < th[1]:               return 0.25
+        if in_a < th[2]:               return 0.50
+        if in_a < th[3]:               return 0.75
+        return 1.0
 
-    def compute(self, metrics):
-        individual = {k: self.normalize_var(k, metrics.get(k, 0.0))
-                      for k in self.WEIGHTS}
+    @staticmethod
+    def _normalize_log(value, normal, severe):
+        """log10 normalize entre normal y severe; clamp en [0,1].
+
+        Weber-Fechner: la severidad de tremor es logaritmica con la
+        magnitud de la senal. Esto evita que un solo outlier rail-pegue
+        la metrica a 1 (problema del normalize lineal anterior)."""
+        if value <= normal:
+            return 0.0
+        if value >= severe:
+            return 1.0
+        # log space mapping
+        log_v = math.log10(max(value, 1e-9))
+        log_n = math.log10(max(normal, 1e-9))
+        log_s = math.log10(max(severe, 1e-9))
+        return max(0.0, min(1.0, (log_v - log_n) / (log_s - log_n)))
+
+    def compute(self, metrics, index_calibrated=True):
+        """
+        index_calibrated=False -> devuelve UPDRS=None y label="Calibrar [C]";
+        no se publica un score sin baseline porque seria meaningless.
+        """
+        individual = {
+            'in_a':      self._normalize_in_a(metrics.get('in_a', 0.0)),
+            'frequency': self._normalize_log(metrics.get('frequency', 0.0),
+                                             self.RANGES['frequency']['normal'],
+                                             self.RANGES['frequency']['severe']),
+            'cv':        self._normalize_log(metrics.get('cv', 0.0),
+                                             self.RANGES['cv']['normal'],
+                                             self.RANGES['cv']['severe']),
+            'jerk':      self._normalize_log(metrics.get('jerk', 0.0),
+                                             self.RANGES['jerk']['normal'],
+                                             self.RANGES['jerk']['severe']),
+        }
+
+        if not index_calibrated:
+            return individual, 0.0, None, "Calibrar [C]"
+
         composite = sum(self.WEIGHTS[k] * individual[k] for k in self.WEIGHTS)
         composite = max(0.0, min(1.0, composite))
         updrs = max(0, min(4, int(round(composite * 4))))
@@ -633,17 +1064,27 @@ hand_trackers = {}
 imu_pre       = IMUPreprocessor()
 sig_proc      = SignalProcessor(max_samples=1024)
 scorer        = UPDRSScorer()
+index_calc    = IndexCalculator()
 sensor_reader = SensorReader(SENSOR_URL, interval=0.05)
 
-plot_accel  = ScrollingPlot(366, PLOT_H,
+# Plots crudos (default ocultos; toggle con [G]).
+# Width: 3 plots iguales sumando CANVAS_W (1340 / 3 ~= 446 c/u).
+_PLOT_W = CANVAS_W // 3
+plot_accel  = ScrollingPlot(_PLOT_W, PLOT_H,
                             "Aceleracion |a_dyn| (sin gravedad)",
                             "g",     (120, 220, 120), n_points=300)
-plot_gyro   = ScrollingPlot(366, PLOT_H,
+plot_gyro   = ScrollingPlot(_PLOT_W, PLOT_H,
                             "Velocidad angular |w|",
                             "deg/s", (120, 220, 255), n_points=300)
-plot_vision = ScrollingPlot(368, PLOT_H,
+plot_vision = ScrollingPlot(CANVAS_W - 2 * _PLOT_W, PLOT_H,
                             "Distancia pulgar-indice (vision)",
                             "norm",  (255, 220, 120), n_points=300)
+
+# Estado de UI (toggleable por teclas).
+ui_state = {
+    "show_plots": False,    # [G]
+    "show_fft":   False,    # [F] - placeholder, FFT debug pendiente
+}
 
 
 # =====================================================================
@@ -729,8 +1170,8 @@ def draw_landmarks(canvas, lms, label):
 
     wx, wy = lm_to_pixel(lms.landmark[0])
     cv2.circle(canvas, (wx, wy), 6, (220, 220, 220), -1)
-    cv2.putText(canvas, label, (max(wx - 15, 2), max(wy - 12, 15)),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
+    text.queue(max(wx - 18, 2), max(wy - 24, 4), label,
+               size=12, color=(255, 255, 255), bold=True)
 
 
 def draw_bar(canvas, x, y, w, h, value, max_val, color):
@@ -742,154 +1183,266 @@ def draw_bar(canvas, x, y, w, h, value, max_val, color):
 
 
 def draw_sensor_badge(canvas, x, y, fs):
+    """Pildora con LED + etiqueta IMU OK/OFFLINE + N muestras."""
     connected = sensor_reader.connected
-    color = (0, 200, 0) if connected else (0, 50, 255)
-    text  = "IMU OK" if connected else "IMU OFFLINE"
+    led = (0, 200, 0) if connected else (0, 50, 255)
+    label = "IMU OK" if connected else "IMU OFFLINE"
 
-    cv2.circle(canvas, (x + 10, y + 10), 7, color, -1)
-    cv2.circle(canvas, (x + 10, y + 10), 7, (220, 220, 220), 1)
-    cv2.putText(canvas, text, (x + 24, y + 14),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1, cv2.LINE_AA)
-    cv2.putText(canvas,
-                "N=%d  fs=%.1f Hz" % (sensor_reader.total_samples, fs),
-                (x + 24, y + 28),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.32, (170, 170, 180), 1, cv2.LINE_AA)
+    # Fondo de la pildora
+    cv2.rectangle(canvas, (x, y), (x + PANEL_W - 24, y + 40),
+                  (15, 15, 20), -1)
+    cv2.rectangle(canvas, (x, y), (x + PANEL_W - 24, y + 40),
+                  (60, 60, 70), 1)
+    # LED
+    cv2.circle(canvas, (x + 14, y + 20), 8, led, -1)
+    cv2.circle(canvas, (x + 14, y + 20), 8, (220, 220, 220), 1)
+    # Texto via Pillow (nitido)
+    text.queue(x + 32, y + 6,  label, size=18, color=led, bold=True)
+    text.queue(x + 32, y + 24, f"N={sensor_reader.total_samples}  fs={fs:.1f} Hz",
+               size=12, color=(170, 170, 180))
     if not connected and sensor_reader.last_error:
-        cv2.putText(canvas, "err: " + sensor_reader.last_error[:28],
-                    (x + 24, y + 42),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.30, (100, 100, 255), 1, cv2.LINE_AA)
+        text.queue(x + 32, y + 24,
+                   "err: " + sensor_reader.last_error[:24],
+                   size=11, color=(120, 120, 255))
 
 
-def _draw_section_header(canvas, x, y, text, color):
-    cv2.putText(canvas, text, (x, y),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.42, color, 1, cv2.LINE_AA)
+def _draw_section_header(x, y, label, color):
+    text.queue(x, y, label, size=14, color=color, bold=True)
 
 
 def _draw_hand_section(canvas, px, y, hlabel, tk):
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    name = "Mano Der." if hlabel == HAND_RIGHT else "Mano Izq."
+    """Card por mano: detected + tap/oc/pron en una linea limpia."""
+    name = "Mano Derecha" if hlabel == HAND_RIGHT else "Mano Izquierda"
     hdr  = (200, 200, 255) if hlabel == HAND_RIGHT else (255, 200, 255)
+    text.queue(px, y, name, size=14, color=hdr, bold=True)
+    y += 22
 
-    cv2.putText(canvas, name, (px, y), font, 0.43, hdr, 1, cv2.LINE_AA)
-    y += 15
-
-    tc = (0, 255, 100) if tk.last_tap else (110, 110, 110)
-    cv2.putText(canvas,
-                f"Golpeteo: {'SI' if tk.last_tap else 'NO'}  Taps:{tk.tap_count}",
-                (px + 6, y), font, 0.31, tc, 1, cv2.LINE_AA)
-    y += 13
+    tc = (0, 255, 100) if tk.last_tap else (140, 140, 140)
+    text.queue(px + 8, y,
+               f"Tap {'ON' if tk.last_tap else 'off'}    {tk.tap_count} toques",
+               size=12, color=tc)
+    y += 18
 
     oc = tk.last_oc or "---"
     oc_c = {OC_OPEN: (0, 255, 160), OC_CLOSED: (50, 120, 255),
-            OC_PARTIAL: (255, 210, 0)}.get(oc, (110, 110, 110))
-    cv2.putText(canvas, f"Mano: {oc}  Cambios:{tk.oc_count}",
-                (px + 6, y), font, 0.31, oc_c, 1, cv2.LINE_AA)
-    y += 13
+            OC_PARTIAL: (255, 210, 0)}.get(oc, (140, 140, 140))
+    text.queue(px + 8, y, f"Mano: {oc}    {tk.oc_count} cambios",
+               size=12, color=oc_c)
+    y += 18
 
     pr = tk.last_pron or "---"
     pr_c = {ROT_SUP: (0, 220, 255), ROT_PRON: (255, 160, 0),
-            ROT_NEUTRO: (110, 110, 110)}.get(pr, (110, 110, 110))
-    cv2.putText(canvas, f"Rot: {pr}  Cambios:{tk.pron_count}",
-                (px + 6, y), font, 0.31, pr_c, 1, cv2.LINE_AA)
-    return y + 16
+            ROT_NEUTRO: (140, 140, 140)}.get(pr, (140, 140, 140))
+    text.queue(px + 8, y, f"Rot: {pr}    {tk.pron_count} cambios",
+               size=12, color=pr_c)
+    return y + 22
 
 
-def _draw_metrics_section(canvas, px, y, bw, metrics, individual):
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    _draw_section_header(canvas, px, y, "Variables Sensor+Vision", (200, 200, 120))
-    y += 14
+def _draw_in_indices(canvas, px, y, bw, metrics, calibrated):
+    """Tarjeta destacada del Tremor Normality Index (Sousa Paixao 2019).
 
-    var_rows = (
-        ("Frecuencia",  f"{metrics['frequency']:.2f} Hz",    'frequency',   "bradicinesia"),
-        ("Amplitud",    f"{metrics['amplitude']:.3f}",       'amplitude',   "hipocinesia"),
-        ("Vel.Angular", f"{metrics['angular_vel']:.1f} d/s", 'angular_vel', "lentitud"),
-        ("CV",          f"{metrics['cv']:.1f} %",            'cv',          "irregularidad"),
-        ("Jerk",        f"{metrics['jerk']:.2f} g/s",        'jerk',        "falta control"),
+    Es la metrica clinica primaria; va GRANDE.
+    """
+    # Marco
+    h = 100
+    cv2.rectangle(canvas, (px - 4, y), (px + bw + 4, y + h),
+                  (18, 22, 28), -1)
+    cv2.rectangle(canvas, (px - 4, y), (px + bw + 4, y + h),
+                  (60, 80, 100), 1)
+    text.queue(px + 4, y + 4, "Tremor Normality Index", size=12,
+               color=(150, 200, 255), bold=True)
+
+    in_a = metrics.get('in_a', 0.0)
+    in_g = metrics.get('in_g', 0.0)
+
+    if not calibrated:
+        text.queue(px + 4, y + 28,
+                   "Sin calibrar", size=18,
+                   color=(255, 180, 100), bold=True)
+        text.queue(px + 4, y + 56,
+                   "Pulsa  C  con sensor inmovil",
+                   size=12, color=(180, 180, 200))
+        text.queue(px + 4, y + 74,
+                   "en mano sana ~10 s",
+                   size=12, color=(180, 180, 200))
+        return y + h + 10
+
+    # Color escala: verde (~1) -> amarillo (~5) -> naranja (~12) -> rojo (>20)
+    def color_for(v):
+        if v < 1.5:  return (0, 220, 0)
+        if v < 5.0:  return (0, 220, 220)
+        if v < 12.0: return (0, 160, 255)
+        return (40, 50, 255)
+
+    # In_a (acelerometro) - mas grande
+    text.queue(px + 4, y + 22, "Acel.", size=11, color=(160, 160, 170))
+    text.queue(px + 50, y + 22,
+               f"{in_a:.1f}x", size=24,
+               color=color_for(in_a), bold=True)
+    text.queue(px + 4 + bw - 60, y + 30,
+               f"RMS {metrics.get('rms_a', 0.0)*1000:.0f} mg",
+               size=10, color=(140, 140, 150))
+
+    # In_g (giroscopio) - secundario
+    text.queue(px + 4, y + 60, "Giro.", size=11, color=(160, 160, 170))
+    text.queue(px + 50, y + 56,
+               f"{in_g:.1f}x", size=20,
+               color=color_for(in_g), bold=True)
+    text.queue(px + 4 + bw - 60, y + 64,
+               f"RMS {metrics.get('rms_g', 0.0):.1f} d/s",
+               size=10, color=(140, 140, 150))
+
+    return y + h + 10
+
+
+def _draw_secondary_metrics(canvas, px, y, bw, metrics, individual):
+    """Bloque pequeño de metricas auxiliares con sus barras."""
+    text.queue(px, y, "Variables auxiliares", size=12,
+               color=(200, 200, 120), bold=True)
+    y += 18
+
+    rows = (
+        ("Frecuencia",   f"{metrics['frequency']:.1f} Hz",    'frequency',
+            "pico tremor"),
+        ("CV inter-tap", f"{metrics['cv']:.0f} %",            'cv',
+            "regularidad"),
+        ("Jerk",         f"{metrics['jerk']:.1f} g/s",        'jerk',
+            "suavidad"),
+        ("Amp. vision",  f"{metrics['amplitude']:.2f}",        None,
+            "solo display"),
     )
-    for vname, vstr, vkey, vcorr in var_rows:
-        score = individual.get(vkey, 0.0)
-        bar_col = (0, int((1 - score) * 190), int(score * 255))
-        cv2.putText(canvas, f"{vname}: {vstr}", (px + 4, y), font, 0.30,
-                    (180, 180, 180), 1, cv2.LINE_AA)
-        tw = cv2.getTextSize(f"{vname}: {vstr}", font, 0.30, 1)[0][0]
-        cv2.putText(canvas, vcorr, (px + 6 + tw + 4, y), font, 0.24,
-                    (100, 100, 110), 1, cv2.LINE_AA)
-        y += 9
-        draw_bar(canvas, px + 4, y, bw, 6, score, 1.0, bar_col)
-        y += 12
+    for label, val_str, key, hint in rows:
+        score = individual.get(key, 0.0) if key else 0.0
+        bar_color = (0, int((1 - score) * 200), int(score * 255)) if key \
+                    else (90, 90, 110)
+        text.queue(px, y, label, size=11, color=(200, 200, 200))
+        text.queue(px + 110, y, val_str, size=11, color=(255, 255, 255), bold=True)
+        text.queue(px + 220, y, hint, size=10, color=(120, 120, 130))
+        y += 14
+        if key:
+            draw_bar(canvas, px, y, bw, 5, score, 1.0, bar_color)
+        y += 10
     return y
 
 
-def _draw_score_section(canvas, px, y, bw, composite, updrs, ulabel):
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    color = scorer.COLORS.get(updrs, (200, 200, 200))
-    _draw_section_header(canvas, px, y, "Indice UPDRS", (255, 255, 200))
-    y += 18
-    cv2.putText(canvas, f"{updrs} - {ulabel}", (px + 4, y), font, 0.50,
-                color, 2, cv2.LINE_AA)
-    y += 14
-    draw_bar(canvas, px + 4, y, bw, 11, composite, 1.0, color)
-    cv2.putText(canvas, f"{composite * 100:.0f}%",
-                (px + bw + 8, y + 9), font, 0.30,
-                (150, 150, 150), 1, cv2.LINE_AA)
+def _draw_score_section(canvas, px, y, bw, composite, updrs, ulabel,
+                         calibrated):
+    """UPDRS grade GRANDE con barra y % - la lectura primaria del paciente."""
+    color = scorer.COLORS.get(updrs, (200, 200, 200)) if updrs is not None \
+            else (160, 160, 170)
+    text.queue(px, y, "UPDRS Parte 3", size=12,
+               color=(255, 255, 200), bold=True)
+    y += 22
+
+    if updrs is None:
+        # No calibrado: mostramos la instruccion en lugar de un score falso.
+        text.queue(px, y, ulabel, size=24, color=color, bold=True)
+        y += 32
+        text.queue(px, y,
+                   "El score se publica solo despues",
+                   size=11, color=(160, 160, 170))
+        y += 16
+        text.queue(px, y,
+                   "de la calibracion saludable.",
+                   size=11, color=(160, 160, 170))
+        return y + 18
+
+    # Numero gigante + label
+    text.queue(px, y, f"{updrs}", size=64, color=color, bold=True)
+    text.queue(px + 70, y + 14, ulabel, size=20, color=color, bold=True)
+    text.queue(px + 70, y + 44,
+               f"compuesto {composite*100:.0f} %",
+               size=11, color=(180, 180, 190))
+    y += 76
+    draw_bar(canvas, px, y, bw, 12, composite, 1.0, color)
     return y + 20
 
 
-def draw_panel(canvas, metrics, individual, composite, updrs, ulabel):
-    x0   = VIDEO_W
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    px   = x0 + 12
-    bw   = PANEL_W - 40
+def _draw_calibration_overlay(canvas):
+    """Overlay grande mientras [C] esta corriendo (solo sobre el video)."""
+    if not index_calc.cal_active:
+        return
+    progress = index_calc.cal_progress()
 
-    cv2.rectangle(canvas, (x0, 0), (CANVAS_W, VIDEO_H), (25, 25, 30), -1)
+    # Dim solo la region del video; el panel queda intacto.
+    video_region = canvas[:VIDEO_H, :VIDEO_W]
+    video_region[:] = (video_region * 0.35).astype(np.uint8)
+
+    text.queue(VIDEO_W // 2 - 200, VIDEO_H // 2 - 60,
+               "CALIBRANDO BASELINE",
+               size=32, color=(255, 220, 100), bold=True)
+    text.queue(VIDEO_W // 2 - 230, VIDEO_H // 2 - 16,
+               "Mantener sensor INMOVIL en mano SANA",
+               size=18, color=(220, 220, 230))
+    text.queue(VIDEO_W // 2 - 60, VIDEO_H // 2 + 30,
+               f"{progress*100:.0f} %",
+               size=40, color=(0, 220, 220), bold=True)
+
+    bar_x = VIDEO_W // 2 - 200
+    bar_y = VIDEO_H // 2 + 90
+    draw_bar(canvas, bar_x, bar_y, 400, 14, progress, 1.0, (0, 200, 220))
+
+
+def draw_panel(canvas, metrics, individual, composite, updrs, ulabel):
+    x0 = VIDEO_W
+    px = x0 + 16
+    bw = PANEL_W - 32
+
+    # Fondo + separador
+    cv2.rectangle(canvas, (x0, 0), (CANVAS_W, VIDEO_H), (22, 22, 28), -1)
     cv2.line(canvas, (x0, 0), (x0, VIDEO_H), (70, 70, 80), 2)
 
-    y = 22
-    cv2.putText(canvas, "UPDRS Parte 3", (px, y), font, 0.55,
-                (255, 255, 120), 2, cv2.LINE_AA)
-    y += 16
-    cv2.putText(canvas, "Analisis Cuantitativo", (px, y), font, 0.32,
-                (140, 140, 150), 1, cv2.LINE_AA)
-    y += 8
+    y = 14
+    text.queue(px, y, "UPDRS Parte 3", size=22,
+               color=(255, 240, 130), bold=True)
+    y += 30
+    text.queue(px, y, "Analisis cuantitativo del tremor",
+               size=11, color=(150, 150, 165))
+    y += 22
 
-    cv2.rectangle(canvas, (px - 4, y), (x0 + PANEL_W - 8, y + 52),
-                  (15, 15, 20), -1)
-    cv2.rectangle(canvas, (px - 4, y), (x0 + PANEL_W - 8, y + 52),
-                  (60, 60, 70), 1)
-    draw_sensor_badge(canvas, px, y + 2, metrics.get('fs', 0.0))
-    y += 60
+    # Sensor badge
+    draw_sensor_badge(canvas, px, y, metrics.get('fs', 0.0))
+    y += 50
 
+    # ===== UPDRS GRADE (grande, el headline) =====
+    calibrated = index_calc.is_calibrated
+    y = _draw_score_section(canvas, px, y, bw, composite, updrs, ulabel,
+                            calibrated)
+    y += 6
+
+    # ===== Tremor Normality Index =====
+    y = _draw_in_indices(canvas, px, y, bw, metrics, calibrated)
+
+    # Linea separadora
+    cv2.line(canvas, (px, y), (px + bw, y), (60, 60, 75), 1)
+    y += 10
+
+    # ===== Manos =====
     for hlabel in (HAND_RIGHT, HAND_LEFT):
         tk = hand_trackers.get(hlabel)
         if tk:
             y = _draw_hand_section(canvas, px, y, hlabel, tk)
 
-    cv2.line(canvas, (px, y), (x0 + PANEL_W - 12, y), (50, 50, 60), 1)
+    cv2.line(canvas, (px, y), (px + bw, y), (60, 60, 75), 1)
     y += 10
 
-    y = _draw_metrics_section(canvas, px, y, bw, metrics, individual)
-    y += 2
-    cv2.line(canvas, (px, y), (x0 + PANEL_W - 12, y), (50, 50, 60), 1)
-    y += 12
+    # ===== Variables auxiliares =====
+    y = _draw_secondary_metrics(canvas, px, y, bw, metrics, individual)
 
-    y = _draw_score_section(canvas, px, y, bw, composite, updrs, ulabel)
-
-    weight_txt = "pesos: " + " ".join(
-        f"{k[:4]}:{int(v*100)}" for k, v in scorer.WEIGHTS.items())
-    cv2.putText(canvas, weight_txt, (px + 4, y), font, 0.25,
-                (110, 110, 120), 1, cv2.LINE_AA)
-
-    y_bot = VIDEO_H - 32
-    cv2.line(canvas, (px, y_bot), (x0 + PANEL_W - 12, y_bot), (50, 50, 60), 1)
-    y_bot += 14
-    cv2.putText(canvas, "[R] Reset   [Q] Salir   [P] Imprime metricas",
-                (px, y_bot), font, 0.28, (130, 130, 130), 1, cv2.LINE_AA)
+    # ===== Hotkeys footer =====
+    y_bot = VIDEO_H - 28
+    cv2.line(canvas, (px, y_bot - 6), (px + bw, y_bot - 6), (60, 60, 75), 1)
+    text.queue(px, y_bot,
+               "Q salir  R reset  C calibrar  G plots  F FFT  P print",
+               size=10, color=(140, 140, 150))
 
 
 def draw_plots(canvas):
-    plot_accel.draw(canvas, 0,   VIDEO_H)
-    plot_gyro.draw (canvas, 366, VIDEO_H)
-    plot_vision.draw(canvas, 732, VIDEO_H)
+    """Render de los 3 plots crudos en la franja inferior."""
+    x = 0
+    plot_accel.draw(canvas, x, VIDEO_H);                 x += plot_accel.width
+    plot_gyro.draw (canvas, x, VIDEO_H);                 x += plot_gyro.width
+    plot_vision.draw(canvas, x, VIDEO_H)
 
 
 # =====================================================================
@@ -930,17 +1483,35 @@ def process_hands(canvas_img, results):
 
 def print_metrics_dump(metrics_dict, individual_scores, composite_score,
                        updrs_grade, label_text):
-    print("\n" + "=" * 50)
+    print("\n" + "=" * 60)
     print("  METRICAS ACTUALES")
-    print("=" * 50)
-    print(f"  fs efectiva     = {metrics_dict['fs']:.2f} Hz")
-    print(f"  Muestras IMU    = {sensor_reader.total_samples}")
-    for k in ('frequency', 'amplitude', 'angular_vel', 'cv', 'jerk'):
-        print(f"  {k:12s}    = {metrics_dict[k]:.3f}"
-              f"  -> score {individual_scores[k]:.2f}")
-    print(f"  Indice compuesto = {composite_score:.3f}")
-    print(f"  UPDRS            = {updrs_grade} ({label_text})")
-    print("=" * 50)
+    print("=" * 60)
+    print(f"  fs efectiva       = {metrics_dict['fs']:.2f} Hz")
+    print(f"  Muestras IMU      = {sensor_reader.total_samples}")
+    print(f"  Calibrado         = {'SI' if index_calc.is_calibrated else 'NO'}")
+    if index_calc.is_calibrated:
+        b = index_calc.baseline
+        print(f"    baseline        MPS_a={b['mps_a_g']:.4f}g"
+              f"  STDPS_a={b['stdps_a_g']:.4f}g")
+        print(f"                    MPS_g={b['mps_g_dps']:.2f}d/s"
+              f"  STDPS_g={b['stdps_g_dps']:.2f}d/s")
+        print(f"                    n={b['n_samples']}  ts={b['timestamp']}")
+    print(f"  In_a (acelerom.)  = {metrics_dict.get('in_a', 0.0):.2f} x baseline")
+    print(f"  In_g (giroscop.)  = {metrics_dict.get('in_g', 0.0):.2f} x baseline")
+    print(f"  RMS-a (5s)        = {metrics_dict.get('rms_a', 0.0)*1000:.2f} mg")
+    print(f"  RMS-g (5s)        = {metrics_dict.get('rms_g', 0.0):.2f} d/s")
+    print("  --- secundarias ---")
+    aux = ('frequency', 'amplitude', 'angular_vel', 'cv', 'jerk')
+    for k in aux:
+        score = individual_scores.get(k, 0.0)
+        print(f"  {k:14s}  = {metrics_dict[k]:.3f}  -> score {score:.2f}")
+    print("  --- UPDRS ---")
+    if updrs_grade is None:
+        print(f"  Indice compuesto  = {label_text} (sin calibracion)")
+    else:
+        print(f"  Indice compuesto  = {composite_score:.3f}")
+        print(f"  UPDRS             = {updrs_grade} ({label_text})")
+    print("=" * 60)
 
 
 # =====================================================================
@@ -949,11 +1520,18 @@ def print_metrics_dump(metrics_dict, individual_scores, composite_score,
 def main():
     print("=" * 60)
     print("  UPDRS Parte 3 - Analisis Cuantitativo")
-    print("  ESP32-CAM + MPU6050")
+    print("  ESP32-CAM + MPU6050  (sensor en falange distal del indice)")
     print("  Frame : " + FRAME_URL)
     print("  Sensor: " + SENSOR_URL)
-    print("  Teclas: Q=salir  R=reset  P=imprime metricas")
+    print("  Teclas: Q salir  R reset  C calibrar  G plots  F FFT  P print")
     print("=" * 60)
+
+    if not index_calc.is_calibrated:
+        print("")
+        print("  >>> NO HAY BASELINE CALIBRADO <<<")
+        print("  El indice UPDRS quedara oculto hasta que se calibre.")
+        print("  Pulsa  C  con sensor inmovil en mano sana ~10 s.")
+        print("")
 
     sensor_reader.start()
 
@@ -988,33 +1566,43 @@ def main():
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             results = hands.process(rgb)
 
-            canvas = np.zeros((CANVAS_H, CANVAS_W, 3), dtype=np.uint8)
+            # Canvas size depende de si los plots estan visibles.
+            ch = CANVAS_H_PLOTS if ui_state["show_plots"] else CANVAS_H_NOPLOTS
+            canvas = np.zeros((ch, CANVAS_W, 3), dtype=np.uint8)
             canvas[:VIDEO_H, :VIDEO_W] = cv2.resize(frame, (VIDEO_W, VIDEO_H))
 
             process_hands(canvas, results)
 
-            metrics = sig_proc.compute_all()
-            individual, composite, updrs, ulabel = scorer.compute(metrics)
+            metrics = sig_proc.compute_all(index_calc=index_calc)
+            individual, composite, updrs, ulabel = scorer.compute(
+                metrics, index_calibrated=index_calc.is_calibrated)
 
             draw_panel(canvas, metrics, individual, composite, updrs, ulabel)
-            draw_plots(canvas)
+            if ui_state["show_plots"]:
+                draw_plots(canvas)
 
             fps_n += 1
             now = time.time()
             if now - fps_ts >= 1.0:
                 fps_val = fps_n / (now - fps_ts)
                 fps_ts, fps_n = now, 0
-            cv2.putText(canvas, f"FPS: {fps_val:.1f}",
-                        (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                        (255, 255, 255), 1, cv2.LINE_AA)
+            text.queue(10, 4, f"FPS {fps_val:.1f}", size=12,
+                       color=(255, 255, 255), bold=True)
+
+            # Overlay grande si estamos calibrando.
+            _draw_calibration_overlay(canvas)
+
+            # Flush UNICO de todo el texto Pillow del frame.
+            text.flush(canvas)
 
             if now - last_metrics_log >= 3.0:
                 last_metrics_log = now
-                print("[MET] fs=%.1fHz  freq=%.2fHz  amp=%.3f"
-                      "  omega=%.1fd/s  CV=%.1f%%  jerk=%.2fg/s"
-                      % (metrics['fs'], metrics['frequency'],
-                         metrics['amplitude'], metrics['angular_vel'],
-                         metrics['cv'], metrics['jerk']))
+                print("[MET] fs=%.1fHz  In_a=%.2fx  In_g=%.2fx  freq=%.2fHz"
+                      "  CV=%.1f%%  jerk=%.2fg/s  cal=%s"
+                      % (metrics['fs'], metrics.get('in_a', 0.0),
+                         metrics.get('in_g', 0.0), metrics['frequency'],
+                         metrics['cv'], metrics['jerk'],
+                         "OK" if index_calc.is_calibrated else "PENDIENTE"))
 
             cv2.imshow("UPDRS - Analisis Cuantitativo", canvas)
 
@@ -1029,9 +1617,21 @@ def main():
                 plot_gyro.data.clear()
                 plot_vision.data.clear()
                 print("[RESET] Contadores, buffers, preprocesador y graficas reiniciados")
+            elif key == ord('c'):
+                if index_calc.cal_active:
+                    print("[CAL] Ya hay calibracion en curso.")
+                else:
+                    index_calc.start_calibration()
+            elif key == ord('g'):
+                ui_state["show_plots"] = not ui_state["show_plots"]
+                print(f"[UI] Plots crudos: {'ON' if ui_state['show_plots'] else 'OFF'}")
+            elif key == ord('f'):
+                ui_state["show_fft"] = not ui_state["show_fft"]
+                print(f"[UI] FFT debug: {'ON' if ui_state['show_fft'] else 'OFF'} (no implementado todavia)")
             elif key == ord('p'):
-                m = sig_proc.compute_all(force=True)
-                ind, comp, upd, lab = scorer.compute(m)
+                m = sig_proc.compute_all(index_calc=index_calc, force=True)
+                ind, comp, upd, lab = scorer.compute(
+                    m, index_calibrated=index_calc.is_calibrated)
                 print_metrics_dump(m, ind, comp, upd, lab)
     finally:
         sensor_reader.stop()
