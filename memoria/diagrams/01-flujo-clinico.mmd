@@ -1,0 +1,41 @@
+flowchart TB
+    subgraph CLI["Evaluación clínica tradicional"]
+        direction TB
+        A1[Paciente acude<br/>a consulta]
+        A2[Neurólogo aplica<br/>MDS-UPDRS Parte 3]
+        A3[Observación visual<br/>de los ejercicios]
+        A4[Calificación 0-4<br/>según juicio experto]
+        A5[Anotación manual<br/>en historia clínica]
+        A1 --> A2 --> A3 --> A4 --> A5
+    end
+
+    subgraph PROP["Sistema cuantitativo propuesto"]
+        direction TB
+        B1[Sensor MPU6050<br/>en falange distal]
+        B2[Cámara ESP32-S3<br/>captura video]
+        B3[Adquisición 100 Hz<br/>+ 15-20 FPS]
+        B4[Procesamiento PC:<br/>MediaPipe + filtros IMU]
+        B5[Métrica In_a + UPDRS<br/>0-4 automatizado]
+        B1 --> B3
+        B2 --> B3
+        B3 --> B4 --> B5
+    end
+
+    subgraph PROB["Problemas del método tradicional"]
+        direction TB
+        P1[Subjetividad<br/>inter-observador]
+        P2[Baja resolución<br/>escala 0-4]
+        P3[Requiere experiencia<br/>clínica]
+        P4[No captura<br/>fluctuaciones diarias]
+    end
+
+    CLI -.-> PROB
+    PROB -.->|aborda| PROP
+
+    classDef cli fill:#fde2e2,stroke:#c0392b,color:#2c2c2c
+    classDef prop fill:#d5f0d5,stroke:#27ae60,color:#2c2c2c
+    classDef prob fill:#fdf3c8,stroke:#b08900,color:#2c2c2c
+
+    class A1,A2,A3,A4,A5 cli
+    class B1,B2,B3,B4,B5 prop
+    class P1,P2,P3,P4 prob

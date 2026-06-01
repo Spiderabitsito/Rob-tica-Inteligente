@@ -1,0 +1,32 @@
+graph LR
+    subgraph ESP32["ESP32-S3 WROOM CAM (FNK0085)"]
+        direction TB
+        CAM["Camara<br/>OV2640/OV3660<br/>VGA 640x480 JPEG"]
+        I2C["Bus I2C<br/>SDA=GPIO41 SCL=GPIO42<br/>400 kHz"]
+        MPU["MPU6050<br/>+/-4 g . +/-500 dps<br/>100 Hz"]
+        SRV["Servidor HTTP<br/>192.168.4.1:80<br/>/frame /sensor /status"]
+        AP["WiFi AP<br/>ESP32-S312<br/>WPA2-PSK"]
+        CAM --> SRV
+        I2C --- MPU
+        MPU --> SRV
+        SRV --- AP
+    end
+    subgraph PC["PC anfitrion (Python 3.10+)"]
+        direction TB
+        HTTP["Cliente HTTP<br/>requests.Session<br/>keep-alive"]
+        VIS["MediaPipe Hands<br/>21 landmarks"]
+        IMU["IMUPreprocessor<br/>median + IIR + complementary"]
+        IDX["IndexCalculator<br/>In_a, In_g<br/>Sousa Paixao 2019"]
+        SCR["UPDRSScorer<br/>0-4 composite"]
+        UI["UI Pillow + cv2<br/>1340x920"]
+        HTTP --> VIS
+        HTTP --> IMU
+        IMU --> IDX --> SCR
+        VIS --> SCR
+        SCR --> UI
+    end
+    AP <-.->|"WiFi 2.4 GHz ~80 ms"| HTTP
+    classDef esp fill:#dbeafe,stroke:#1d4ed8,color:#0c1424
+    classDef pc fill:#d1fae5,stroke:#047857,color:#0c1424
+    class CAM,I2C,MPU,SRV,AP esp
+    class HTTP,VIS,IMU,IDX,SCR,UI pc
