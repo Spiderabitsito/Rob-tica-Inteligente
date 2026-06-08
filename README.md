@@ -225,22 +225,7 @@ Y la consola PC imprime cada 3 s un resumen de métricas:
 
 ---
 
-## Agentes / skills usados durante el desarrollo
 
-Este proyecto se construyó con asistencia de **Claude Code** y los
-siguientes agentes/skills explícitos:
-
-| Agente / skill | Plugin | Cuándo se usó |
-|---|---|---|
-| `general-purpose` (research mode) | core | Investigación de la pinout Freenove FNK0085, lectura de papers, brainstorming de integración |
-| `simplify` skill | core | Code review en 3 ejes (reuse / quality / efficiency) tras cada commit grande |
-| `superpowers:code-reviewer` | superpowers plugin | Code review estructurado contra plan + estándares |
-| `everything-claude-code:code-reviewer` | ECC plugin | Code review focused multi-archivo |
-| `everything-claude-code:planner` | ECC plugin | Planificación de features grandes (refactor de UPDRSScorer, pipeline IMU) |
-
-
-
----
 
 ## Estructura del repo
 
