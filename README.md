@@ -238,10 +238,7 @@ siguientes agentes/skills explícitos:
 | `everything-claude-code:code-reviewer` | ECC plugin | Code review focused multi-archivo |
 | `everything-claude-code:planner` | ECC plugin | Planificación de features grandes (refactor de UPDRSScorer, pipeline IMU) |
 
-> Nota: los agentes los invoca el modelo automáticamente cuando hace
-> falta. No requieren configuración por parte del usuario más allá
-> de tener los plugins instalados (`/plugin install everything-claude-code`
-> y `/plugin install superpowers`).
+
 
 ---
 
